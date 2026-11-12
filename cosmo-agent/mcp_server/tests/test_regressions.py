@@ -4,6 +4,7 @@ import contextlib
 import importlib.util
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -11,6 +12,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import h5py
 import httpx
@@ -22,6 +24,7 @@ sys.path.insert(0, str(ROOT / 'mcp_server'))
 from client_helpers import mcp_call
 from cosmo_exec.config import Config
 from cosmo_exec.ledger import Ledger
+from cosmo_exec.policy import ExecPolicy
 from cosmo_exec.processes import ProcessManager
 
 INITIALIZE = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
@@ -37,6 +40,65 @@ def module(name, relative):
 
 
 class RegressionTests(unittest.TestCase):
+    def test_run_list_updates_completed_run_and_masks_old_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            ledger = Ledger(root)
+            manager = ProcessManager(Config(root, [root]), ledger)
+            run = manager.start_background(argv=[sys.executable, '-c', "pass"], env_extra={"DEMO": "synthetic"})
+            run_id = run["run_id"]
+            manager._live[run_id].wait(timeout=5)
+            original = ledger.read_meta(run_id)
+            self.assertEqual(original["env_extra"], {"DEMO": "[redacted]"})
+            original["env_extra"] = {"DEMO": "old-synthetic-value"}
+            ledger._write_meta(ledger.dir(run_id), original)
+            meta, = manager.list_runs(1)
+            self.assertEqual(meta["status"], "exited")
+            self.assertEqual(meta["exit_code"], 0)
+            self.assertEqual(meta["env_extra"], {"DEMO": "[redacted]"})
+
+    def test_stop_requires_process_group_exit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            ledger = Ledger(root)
+            manager = ProcessManager(Config(root, [root]), ledger)
+            child = "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ready', flush=True); time.sleep(10)"
+            run = manager.start_background(argv=[sys.executable, '-c', child])
+            run_id = run["run_id"]
+            proc = manager._live[run_id]
+            try:
+                deadline = time.monotonic() + 5
+                while "ready" not in manager.read_output(run_id)["stdout"] and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertIn("ready", manager.read_output(run_id)["stdout"])
+                with patch("cosmo_exec.processes.STOP_WAIT_S", 0.2):
+                    pending = manager.stop(run_id)
+                self.assertTrue(pending["signal_sent"])
+                self.assertFalse(pending["stopped"])
+                self.assertEqual(pending["meta"]["status"], "stopping")
+            finally:
+                if proc.poll() is None:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait(timeout=5)
+
+    def test_allowlist_rejects_shadow_binary_and_loader_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            policy = ExecPolicy.from_manifest({"allow_commands": ["/bin/echo"]})
+            manager = ProcessManager(Config(root, [root], exec_policy=policy), Ledger(root))
+            shadow = root / "echo"
+            shadow.write_text("#!/bin/sh\nprintf shadow\n")
+            shadow.chmod(0o700)
+            for launch in (manager.run_foreground, manager.start_background):
+                with self.assertRaises(PermissionError):
+                    launch(argv=[str(shadow), "demo"])
+                with self.assertRaises(PermissionError):
+                    launch(argv=["echo"], env_extra={"PATH": str(root)})
+                with self.assertRaises(PermissionError):
+                    launch(argv=["echo"], env_extra={"PYTHONPATH": str(root)})
+            good = manager.run_foreground(argv=["echo", "approved"], env_extra={"OMP_NUM_THREADS": "2"})
+            self.assertEqual(good["stdout"].strip(), "approved")
+
     def test_background_exit_survives_new_manager(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -222,11 +284,13 @@ class RegressionTests(unittest.TestCase):
         self.assertIn('https://tunnel.example.com',
                       build_transport_security(allowed_origins=['https://tunnel.example.com']).allowed_origins)
 
-    def _probe_host(self, port, host, content_type='application/json'):
+    def _probe_host(self, port, host, content_type='application/json', token=None):
         """POST an initialize request with an arbitrary Host header."""
         headers = {'Host': host, 'Accept': 'application/json, text/event-stream'}
         if content_type:
             headers['Content-Type'] = content_type
+        if token:
+            headers['Authorization'] = f'Bearer {token}'
         # content= (not json=) so that content_type=None really sends no header.
         body = json.dumps(INITIALIZE).encode()
         # trust_env=False: a SOCKS/HTTP proxy in the environment must not swallow loopback calls.
@@ -287,6 +351,13 @@ class RegressionTests(unittest.TestCase):
         with self._http_server(8833, ['--no-dns-rebinding-protection']) as _:
             self.assertEqual(self._probe_host(8833, 'tunnel.example.com').status_code, 200)
             self.assertEqual(self._probe_host(8833, 'tunnel.example.com', content_type=None).status_code, 400)
+
+    def test_bearer_token_enforced_by_http_transport(self):
+        token = "example-local-test"
+        with patch.dict(os.environ, {"COSMO_EXEC_HTTP_TOKEN": token}), self._http_server(8834):
+            self.assertEqual(self._probe_host(8834, "127.0.0.1:8834").status_code, 401)
+            self.assertEqual(self._probe_host(8834, "127.0.0.1:8834", token="wrong").status_code, 401)
+            self.assertEqual(self._probe_host(8834, "127.0.0.1:8834", token=token).status_code, 200)
 
 
 if __name__ == '__main__':

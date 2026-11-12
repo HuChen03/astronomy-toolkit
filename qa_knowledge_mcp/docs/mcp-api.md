@@ -97,7 +97,7 @@ python3 -m qa_knowledge_mcp.mcp_server \
 | `query` | `string` | 必填 | 检索问题或关键词，不能为空 |
 | `knowledge_base_ids` | `string[] \| null` | `null` | 指定小方向知识库 ID；不传时只检索主库，传入后检索主库和指定小方向库 |
 | `top_k` | `integer` | `10` | 返回条数，范围 1～100 |
-| `min_score` | `number` | `0.0` | 最低综合相关度 |
+| `min_score` | `number` | `0.0` | 最低综合排序分，阈值按实际查询和语料标定 |
 
 调用示例：
 
@@ -141,19 +141,23 @@ python3 -m qa_knowledge_mcp.mcp_server \
       "score": 0.82,
       "score_components": {
         "bm25": 1.0,
+        "tfidf": 0.6,
         "vector": 0.0,
-        "rerank": 0.0
+        "rrf": 0.95,
+        "rerank": 0.7
       }
     }
   ],
   "retrieval": {
-    "fusion": "score_sort",
+    "fusion": "rrf",
+    "rrf_k": 20,
     "generated_answer": false
   }
 }
 ```
 
-`source_paragraph` 优先来自 QA JSONL；主库若缺失，则尝试从本地覆盖层的已关联原文证据回填。若没有可靠原文段落，字段为空，不用 QA 答案冒充原文。
+`source_paragraph` 优先来自 QA JSONL。主库缺少段落时，服务按命中的问答内容匹配
+覆盖层中的 QA 版本，并选取该版本的可用证据。缺少证据时段落字段为空。
 
 ## 4. 小方向知识库配置
 

@@ -3,12 +3,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import time
 from pathlib import Path
+from threading import Event, Thread
 from typing import Any, Callable
 
 from lab_knowledge_platform.hub_client import LiteratureHubClient, LiteratureHubSettings
-from lab_knowledge_platform.knowledge_store import KnowledgeStore
+from lab_knowledge_platform.knowledge_store import DEFAULT_TASK_LEASE_SECONDS, KnowledgeStore
 from lab_knowledge_platform.paths import KNOWLEDGE_OVERLAY_DB, PROJECT_ROOT
 from .import_knowledge_documents import import_documents
 from .match_hub_papers import match_papers
@@ -18,6 +20,20 @@ def run_one(store: KnowledgeStore, *, base_url: str) -> dict[str, Any] | None:
     task = store.claim_task()
     if not task:
         return None
+    task_id, lease_token = task["task_id"], task["lease_token"]
+    finished = Event()
+
+    def heartbeat() -> None:
+        while not finished.wait(DEFAULT_TASK_LEASE_SECONDS / 3):
+            try:
+                if not store.renew_task(task_id, lease_token):
+                    return
+            except sqlite3.OperationalError:
+                # A short database lock can clear before the next renewal attempt.
+                continue
+
+    worker = Thread(target=heartbeat, daemon=True)
+    worker.start()
     try:
         handlers: dict[str, Callable[[], dict[str, Any]]] = {
             "match_papers": lambda: match_papers(
@@ -36,11 +52,16 @@ def run_one(store: KnowledgeStore, *, base_url: str) -> dict[str, Any] | None:
         if handler is None:
             raise ValueError(f"unsupported task stage: {task['stage']}")
         result = handler()
-        store.finish_task(task["task_id"], result=result)
-        return {"task_id": task["task_id"], "status": "succeeded", "result": result}
+        if not store.finish_task(task_id, lease_token=lease_token, result=result):
+            return {"task_id": task_id, "status": "lease_lost"}
+        return {"task_id": task_id, "status": "succeeded", "result": result}
     except Exception as error:
-        store.fail_task(task["task_id"], f"{type(error).__name__}: {error}")
-        return {"task_id": task["task_id"], "status": "failed", "error": str(error)}
+        if not store.fail_task(task_id, f"{type(error).__name__}: {error}", lease_token=lease_token):
+            return {"task_id": task_id, "status": "lease_lost"}
+        return {"task_id": task_id, "status": "failed", "error": str(error)}
+    finally:
+        finished.set()
+        worker.join()
 
 
 def run_many(store: KnowledgeStore, *, base_url: str, max_tasks: int = 1, poll_seconds: float = 0.0) -> list[dict[str, Any]]:

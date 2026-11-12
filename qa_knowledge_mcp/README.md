@@ -146,17 +146,21 @@ QA_SOURCE=/absolute/path/to/generate_paper.jsonl \
 - `list_knowledge_bases()`：列出知识库及 QA/论文数量。
 - `search_knowledge(query, knowledge_base_ids, top_k, min_score)`：返回 QA Pair、原文段落和检索分数。
 
-检索采用常见知识库的混合检索流程：
+DOI 与 arXiv ID 支持精确查询。自然语言查询分别使用 BM25、TF-IDF 和可选的
+FAISS 向量召回，再以倒数排名融合（RRF）合并各路候选。主库与小方向库合用
+词项覆盖率重排，并可配置 `QA_RERANK_MODEL` 对合并后的候选调用 CrossEncoder。
+向量模型默认使用 `BAAI/bge-small-zh-v1.5`。模型不可用时仍可执行词项检索。
+流程参考 [Qdrant 的混合查询](https://qdrant.tech/documentation/search/hybrid-queries/)
+和 [OpenSearch 的 RRF](https://docs.opensearch.org/latest/vector-search/ai-search/hybrid-search/rrf/)。
 
-1. `rank_bm25` 关键词召回，适合专有名词、术语和精确匹配。
-2. `TF-IDF` 稀疏向量召回，补充词级相似度。
-3. `sentence-transformers` embedding + `FAISS` 向量召回，默认模型为
-   `BAAI/bge-small-zh-v1.5`。
-4. 可选 `CrossEncoder` reranker；未配置 `QA_RERANK_MODEL` 时使用轻量重排。
+MCP 返回 `score_components` 用于检查召回来源。综合分用于当前查询排序。已有
+`min_score` 阈值可用自己的验证查询重新标定。索引与源文件不匹配时，服务使用源文件
+并在列库结果中给出 `index_warning`。只部署索引时可使用同一版本的 `chunks.jsonl`
+和 `manifest.json`。覆盖层只为精确匹配的 QA 版本补充证据。
 
-MCP 返回 `score_components`，包含 `bm25`、`vector` 和 `rerank`，方便调试
-召回来源。若模型依赖或模型文件不可用，服务会自动降级到 `BM25 + TF-IDF +
-轻量重排`，不会影响启动。
+`uv run --locked qa-knowledge-evaluate --cases config/retrieval_eval.json` 输出论文级
+Recall@K、MRR、nDCG 和 P95 查询延迟。测试集可以用空的 `paper_keys` 标注无答案问题，
+也可以通过 `knowledge_base_ids` 指定跨库评测。
 
 推荐模型配置：
 

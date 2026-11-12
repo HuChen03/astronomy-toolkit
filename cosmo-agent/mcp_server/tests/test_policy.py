@@ -112,7 +112,7 @@ class DenyPatternTests(unittest.TestCase):
 
 class FileWriteGuardTests(unittest.TestCase):
     def _config(self, root):
-        return Config(root, [root], protected_paths=[root / 'sources', root / 'server.py'])
+        return Config(root / 'state', [root], protected_paths=[root / 'sources', root / 'server.py'])
 
     def test_protected_paths_reject_writes_but_allow_reads(self):
         with tempfile.TemporaryDirectory() as tmp:

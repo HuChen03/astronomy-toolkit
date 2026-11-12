@@ -4,11 +4,12 @@ import argparse
 import json
 import os
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 import numpy as np
 
-from .knowledge_base import DEFAULT_EMBEDDING_MODEL, iter_records
+from .knowledge_base import DEFAULT_EMBEDDING_MODEL, EMBEDDING_TEXT_VERSION, embedding_text, iter_records, sha256_file
 from .paths import COSMOLOGICAL_DATA_ROOT
 
 try:
@@ -38,7 +39,7 @@ def build_embeddings(records: list[Any], output_dir: Path, model_name: str, devi
     if SentenceTransformer is None or faiss is None:
         raise RuntimeError("sentence-transformers and faiss-cpu are required to build the offline vector index")
 
-    corpus = [f"{record.question}\n{record.answer}" for record in records]
+    corpus = [embedding_text(record) for record in records]
     model = SentenceTransformer(model_name, device=device)
     embeddings = model.encode(
         corpus,
@@ -56,12 +57,16 @@ def build_embeddings(records: list[Any], output_dir: Path, model_name: str, devi
         "has_faiss_index": True,
         "embedding_model": model_name,
         "embedding_dim": int(embeddings.shape[1]),
+        "embedding_text": EMBEDDING_TEXT_VERSION,
+        "faiss_hash": sha256_file(output_dir / "faiss.index"),
     }
 
 
-def write_manifest(input_path: Path, output_dir: Path, records: list[Any], embedding_info: dict[str, Any]) -> None:
+def write_manifest(input_path: Path, output_dir: Path, records: list[Any], embedding_info: dict[str, Any], source_hash: str) -> None:
     manifest = {
         "source_file": str(input_path),
+        "source_hash": source_hash,
+        "chunks_hash": sha256_file(output_dir / "chunks.jsonl"),
         "record_count": len(records),
         "doc_count": len({record.doc_id for record in records}),
         **embedding_info,
@@ -72,11 +77,21 @@ def write_manifest(input_path: Path, output_dir: Path, records: list[Any], embed
 
 
 def build(input_path: Path, output_dir: Path, *, embedding: bool, model_name: str, device: str, batch_size: int) -> int:
-    records = build_records(input_path, output_dir)
-    embedding_info = {"has_faiss_index": False, "embedding_model": None, "embedding_dim": 0}
-    if embedding:
-        embedding_info = build_embeddings(records, output_dir, model_name, device, batch_size)
-    write_manifest(input_path, output_dir, records, embedding_info)
+    source_hash = sha256_file(input_path)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(prefix=".qa-build-", dir=output_dir) as temporary:
+        stage = Path(temporary)
+        records = build_records(input_path, stage)
+        embedding_info = {"has_faiss_index": False, "embedding_model": None, "embedding_dim": 0}
+        if embedding:
+            embedding_info = build_embeddings(records, stage, model_name, device, batch_size)
+        if sha256_file(input_path) != source_hash:
+            raise RuntimeError(f"knowledge source changed while indexing: {input_path}")
+        write_manifest(input_path, stage, records, embedding_info, source_hash)
+        for name in ("chunks.jsonl", "embeddings.npy", "faiss.index", "manifest.json"):
+            artifact = stage / name
+            if artifact.is_file():
+                artifact.replace(output_dir / name)
     return len(records)
 
 

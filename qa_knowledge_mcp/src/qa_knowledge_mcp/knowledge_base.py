@@ -5,8 +5,10 @@ import json
 import math
 import os
 import re
-from collections import Counter, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from dataclasses import asdict, dataclass
+from functools import lru_cache
+from itertools import zip_longest
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -21,11 +23,6 @@ except Exception:
     faiss = None
 
 try:
-    from rank_bm25 import BM25Okapi
-except Exception:
-    BM25Okapi = None
-
-try:
     from sentence_transformers import CrossEncoder, SentenceTransformer
 except Exception:
     CrossEncoder = None
@@ -33,9 +30,21 @@ except Exception:
 
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_]+")
-_CJK_RE = re.compile(r"[\u3400-\u9fff]")
+_CJK_RUN_RE = re.compile(r"[\u3400-\u9fff]+")
+_PAPER_ID_RE = re.compile(r"10\.\d{4,9}[/_][A-Za-z0-9._;()/+:%-]+|\b\d{4}\.\d{4,5}(?:v\d+)?\b", re.I)
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-zh-v1.5"
 DEFAULT_EMBEDDING_BATCH_SIZE = 8
+RRF_K = 20
+QUERY_CACHE_SIZE = 256
+EMBEDDING_TEXT_VERSION = "question_answer_v1"
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 @dataclass(frozen=True)
@@ -70,19 +79,21 @@ class Record:
 
 
 @dataclass(frozen=True)
-class SearchResult:
+class SearchCandidate:
     record: Record
-    score: float
+    rrf_score: float
     bm25_score: float
+    sparse_score: float
     vector_score: float
-    rerank_score: float
 
-    def public(self) -> dict[str, Any]:
-        result = self.record.public(self.score)
+    def public(self, score: float, rerank_score: float) -> dict[str, Any]:
+        result = self.record.public(score)
         result["score_components"] = {
             "bm25": round(float(self.bm25_score), 6),
+            "tfidf": round(float(self.sparse_score), 6),
             "vector": round(float(self.vector_score), 6),
-            "rerank": round(float(self.rerank_score), 6),
+            "rrf": round(self.rrf_score, 6),
+            "rerank": round(float(rerank_score), 6),
         }
         return result
 
@@ -94,10 +105,41 @@ def normalize_text(value: Any) -> str:
 def tokenize(text: str) -> list[str]:
     lowered = normalize_text(text).lower()
     tokens = [item.lower() for item in _WORD_RE.findall(lowered)]
-    cjk = _CJK_RE.findall(lowered)
-    tokens.extend(cjk)
-    tokens.extend("".join(cjk[index : index + 2]) for index in range(len(cjk) - 1))
+    for run in _CJK_RUN_RE.findall(lowered):
+        tokens.extend(run)
+        tokens.extend(run[index:index + 2] for index in range(len(run) - 1))
     return tokens
+
+
+def embedding_text(record: Record) -> str:
+    return f"{record.question}\n{record.answer}"
+
+
+def lexical_text(record: Record) -> str:
+    return "\n".join((record.question, record.answer, record.source_paragraph, record.paper_title,
+                      record.paper_key, doi_from_paper_key(record.paper_key) or "", record.paper_category))
+
+
+def paper_identifiers(value: str) -> set[str]:
+    identifiers = set()
+    for match in _PAPER_ID_RE.finditer(value):
+        key = match.group().lower().rstrip(".,;:")
+        if key.endswith(")") and key.count(")") > key.count("("):
+            key = key[:-1]
+        identifiers.add(doi_from_paper_key(key) or key)
+    return identifiers
+
+
+def _paper_aliases(paper_key: str) -> set[str]:
+    identifiers = paper_identifiers(paper_key)
+    return identifiers | {re.sub(r"v\d+$", "", key) for key in identifiers if "/" not in key}
+
+
+def _identifier_only(query: str) -> bool:
+    value = query.lower()
+    for prefix in ("https://doi.org/", "http://doi.org/", "doi:", "https://arxiv.org/abs/", "arxiv:"):
+        value = value.removeprefix(prefix)
+    return _PAPER_ID_RE.fullmatch(value.strip()) is not None
 
 
 def _stable_doc_id(row: dict[str, Any]) -> str:
@@ -167,17 +209,15 @@ def iter_records(path: Path) -> Iterable[Record]:
                     )
 
 
-class FallbackBM25Index:
+class BM25Index:
     def __init__(self, documents: list[list[str]]) -> None:
-        self.documents = documents
         self.document_count = len(documents)
         self.document_lengths = [len(doc) for doc in documents]
         self.avg_document_length = sum(self.document_lengths) / self.document_count if self.document_count else 0.0
-        self.term_frequencies = [Counter(doc) for doc in documents]
-        self.document_frequencies: dict[str, int] = defaultdict(int)
-        for doc in documents:
-            for term in set(doc):
-                self.document_frequencies[term] += 1
+        self.postings: dict[str, list[tuple[int, int]]] = defaultdict(list)
+        for index, doc in enumerate(documents):
+            for term, frequency in Counter(doc).items():
+                self.postings[term].append((index, frequency))
 
     def get_scores(self, query_tokens: list[str], k1: float = 1.5, b: float = 0.75) -> np.ndarray:
         if self.document_count == 0 or not query_tokens:
@@ -185,18 +225,37 @@ class FallbackBM25Index:
         scores = np.zeros(self.document_count, dtype=float)
         query_counts = Counter(query_tokens)
         for term, qf in query_counts.items():
-            df = self.document_frequencies.get(term, 0)
+            postings = self.postings.get(term, ())
+            df = len(postings)
             if df == 0:
                 continue
             idf = math.log(1.0 + (self.document_count - df + 0.5) / (df + 0.5))
-            for index, tf_counts in enumerate(self.term_frequencies):
-                tf = tf_counts.get(term, 0)
-                if tf == 0:
-                    continue
+            for index, tf in postings:
                 doc_len = self.document_lengths[index] or 1
                 denom = tf + k1 * (1.0 - b + b * (doc_len / (self.avg_document_length or 1.0)))
                 scores[index] += idf * ((tf * (k1 + 1.0)) / denom) * (1.0 + math.log1p(qf))
         return scores
+
+
+@lru_cache(maxsize=2)
+def _embedding_model(name: str, device: str):
+    return SentenceTransformer(name, device=device)
+
+
+@lru_cache(maxsize=2)
+def _reranker_model(name: str):
+    return CrossEncoder(name)
+
+
+def _top_scores(scores: np.ndarray, depth: int) -> dict[int, float]:
+    eligible = np.flatnonzero(np.isfinite(scores) & (scores > 0))
+    if eligible.size > depth:
+        cutoff = np.partition(scores[eligible], eligible.size - depth)[-depth]
+        above = eligible[scores[eligible] > cutoff]
+        tied = eligible[scores[eligible] == cutoff][:depth - above.size]
+        eligible = np.concatenate((above, tied))
+    order = np.lexsort((eligible, -scores[eligible]))
+    return {int(index): float(scores[index]) for index in eligible[order]}
 
 
 class KnowledgeBase:
@@ -211,13 +270,14 @@ class KnowledgeBase:
         self.sparse_matrix = None
         self.embedding_model: Any | None = None
         self.embedding_model_name = os.environ.get("QA_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
-        self.embeddings: np.ndarray | None = None
         self.faiss_index: Any | None = None
         self.reranker: Any | None = None
         self.reranker_model_name = os.environ.get("QA_RERANK_MODEL", "").strip()
         self.model_error = ""
         self.reranker_error = ""
-        self._cache: dict[str, np.ndarray] = {}
+        self.index_error = ""
+        self.index_manifest: dict[str, Any] = {}
+        self._cache: OrderedDict[str, np.ndarray] = OrderedDict()
         self.reload()
 
     @staticmethod
@@ -229,15 +289,56 @@ class KnowledgeBase:
         return index_path
 
     def reload(self) -> dict[str, Any]:
-        records_path = self._records_index_path()
-        if records_path and records_path.exists():
-            self.records = [self._load_record(json.loads(line)) for line in records_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-        elif self.source_path.exists():
-            self.records = list(iter_records(self.source_path))
-        else:
-            raise FileNotFoundError(f"knowledge source does not exist: {self.source_path}")
+        self.index_error = ""
+        self.index_manifest = {}
+        self.records = self._load_index_records()
         self._build_indices()
         return self.stats()
+
+    def _load_index_records(self) -> list[Record]:
+        records_path = self._records_index_path()
+        if records_path and records_path.is_file():
+            try:
+                manifest_path = records_path.with_name("manifest.json")
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.is_file() else {}
+                if not isinstance(manifest, dict):
+                    raise ValueError("index manifest must be a JSON object")
+                digest = hashlib.sha256()
+                records = []
+                with records_path.open("rb") as handle:
+                    for line in handle:
+                        digest.update(line)
+                        if line.strip():
+                            records.append(Record(**json.loads(line)))
+                if manifest.get("chunks_hash") and manifest["chunks_hash"] != digest.hexdigest():
+                    raise ValueError("chunks hash differs from index manifest")
+                if manifest.get("record_count", len(records)) != len(records):
+                    raise ValueError("record count differs from index manifest")
+                if self.source_path.is_file():
+                    if manifest.get("source_hash"):
+                        if manifest["source_hash"] != sha256_file(self.source_path):
+                            raise ValueError("source hash differs from index manifest")
+                    elif not self._matches_source(records):
+                        raise ValueError("legacy index records differ from source")
+                self.index_manifest = manifest
+                return records
+            except (OSError, TypeError, ValueError) as exc:
+                self.index_error = str(exc)
+                if not self.source_path.is_file():
+                    raise ValueError(f"unusable index {records_path}: {exc}") from exc
+        if not self.source_path.is_file():
+            raise FileNotFoundError(f"knowledge source does not exist: {self.source_path}")
+        return list(iter_records(self.source_path))
+
+    def _matches_source(self, records: list[Record]) -> bool:
+        for indexed, source in zip_longest(records, iter_records(self.source_path)):
+            if indexed is None or source is None:
+                return False
+            indexed_payload, source_payload = indexed.payload(), source.payload()
+            del indexed_payload["source_file"], source_payload["source_file"]
+            if indexed_payload != source_payload:
+                return False
+        return True
 
     def _records_index_path(self) -> Path | None:
         if self.index_path is None:
@@ -246,16 +347,16 @@ class KnowledgeBase:
             return self.index_path / "chunks.jsonl"
         return self.index_path
 
-    @staticmethod
-    def _load_record(payload: dict[str, Any]) -> Record:
-        return Record(**dict(payload))
-
     def _build_indices(self) -> None:
-        self.corpus = [f"{record.question}\n{record.answer}\n{record.source_paragraph}" for record in self.records]
+        self.corpus = [lexical_text(record) for record in self.records]
+        self.paper_lookup: dict[str, list[int]] = defaultdict(list)
+        for index, record in enumerate(self.records):
+            for identifier in _paper_aliases(record.paper_key):
+                self.paper_lookup[identifier].append(index)
         tokenized_corpus = [tokenize(text) for text in self.corpus]
-        self.bm25_index = BM25Okapi(tokenized_corpus) if BM25Okapi is not None else FallbackBM25Index(tokenized_corpus)
+        self.bm25_index = BM25Index(tokenized_corpus)
 
-        if self.corpus:
+        if any(tokenized_corpus):
             self.sparse_vectorizer = TfidfVectorizer(
                 tokenizer=tokenize,
                 preprocessor=normalize_text,
@@ -277,7 +378,6 @@ class KnowledgeBase:
 
     def _load_embedding_index(self) -> bool:
         self.embedding_model = None
-        self.embeddings = None
         self.faiss_index = None
         self.model_error = ""
         if not _env_bool("QA_ENABLE_EMBEDDING", True):
@@ -285,36 +385,36 @@ class KnowledgeBase:
         if faiss is None or SentenceTransformer is None:
             self.model_error = "sentence-transformers or faiss is not installed"
             return False
-        if self.index_dir is None:
+        manifest = self.index_manifest
+        if self.index_dir is None or not manifest.get("has_faiss_index"):
             return False
         faiss_path = self.index_dir / "faiss.index"
-        embeddings_path = self.index_dir / "embeddings.npy"
-        manifest_path = self.index_dir / "manifest.json"
-        if not faiss_path.exists() or not embeddings_path.exists() or not manifest_path.exists():
-            return False
         try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            if manifest.get("record_count") != len(self.records):
-                self.model_error = "offline embedding index record_count does not match records"
-                return False
             model_name = str(manifest.get("embedding_model") or "")
-            if model_name and model_name != self.embedding_model_name:
-                self.model_error = f"offline embedding model mismatch: {model_name}"
-                return False
-            self.embedding_model = SentenceTransformer(self.embedding_model_name, device=os.environ.get("QA_EMBEDDING_DEVICE", "cpu"))
-            self.embeddings = np.load(embeddings_path).astype("float32")
-            self.faiss_index = faiss.read_index(str(faiss_path))
+            if model_name != self.embedding_model_name:
+                raise ValueError(f"offline embedding model mismatch: {model_name}")
+            if manifest.get("embedding_text", EMBEDDING_TEXT_VERSION) != EMBEDDING_TEXT_VERSION:
+                raise ValueError("offline embedding text format mismatch")
+            if manifest.get("faiss_hash"):
+                contents = faiss_path.read_bytes()
+                if manifest["faiss_hash"] != hashlib.sha256(contents).hexdigest():
+                    raise ValueError("FAISS file hash differs from index manifest")
+                index = faiss.deserialize_index(np.frombuffer(contents, dtype=np.uint8))
+            else:
+                index = faiss.read_index(str(faiss_path))
+            if index.ntotal != len(self.records) or index.d != manifest.get("embedding_dim"):
+                raise ValueError("FAISS size differs from index manifest")
+            self.embedding_model = _embedding_model(self.embedding_model_name, os.environ.get("QA_EMBEDDING_DEVICE", "cpu"))
+            self.faiss_index = index
             return True
         except Exception as exc:
             self.embedding_model = None
-            self.embeddings = None
             self.faiss_index = None
-            self.model_error = f"{type(exc).__name__}: {exc}"
+            self.index_error = f"{type(exc).__name__}: {exc}"
             return False
 
     def _build_embedding_index(self) -> None:
         self.embedding_model = None
-        self.embeddings = None
         self.faiss_index = None
         self.model_error = ""
         if not self.corpus or not _env_bool("QA_ENABLE_EMBEDDING", True):
@@ -323,24 +423,20 @@ class KnowledgeBase:
             self.model_error = "sentence-transformers or faiss is not installed"
             return
         try:
-            model_kwargs: dict[str, Any] = {}
-            device = os.environ.get("QA_EMBEDDING_DEVICE", "cpu").strip()
-            if device:
-                model_kwargs["device"] = device
-            self.embedding_model = SentenceTransformer(self.embedding_model_name, **model_kwargs)
+            device = os.environ.get("QA_EMBEDDING_DEVICE", "cpu").strip() or "cpu"
+            self.embedding_model = _embedding_model(self.embedding_model_name, device)
             embeddings = self.embedding_model.encode(
-                self.corpus,
+                [embedding_text(record) for record in self.records],
                 batch_size=int(os.environ.get("QA_EMBEDDING_BATCH_SIZE", str(DEFAULT_EMBEDDING_BATCH_SIZE))),
                 show_progress_bar=_env_bool("QA_EMBEDDING_PROGRESS", False),
                 normalize_embeddings=True,
                 convert_to_numpy=True,
             )
-            self.embeddings = np.asarray(embeddings, dtype="float32")
-            self.faiss_index = faiss.IndexFlatIP(self.embeddings.shape[1])
-            self.faiss_index.add(self.embeddings)
+            embeddings = np.asarray(embeddings, dtype="float32")
+            self.faiss_index = faiss.IndexFlatIP(embeddings.shape[1])
+            self.faiss_index.add(embeddings)
         except Exception as exc:
             self.embedding_model = None
-            self.embeddings = None
             self.faiss_index = None
             self.model_error = f"{type(exc).__name__}: {exc}"
 
@@ -353,141 +449,150 @@ class KnowledgeBase:
             self.reranker_error = "sentence-transformers CrossEncoder is not installed"
             return
         try:
-            self.reranker = CrossEncoder(self.reranker_model_name)
+            self.reranker = _reranker_model(self.reranker_model_name)
         except Exception as exc:
             self.reranker = None
             self.reranker_error = f"{type(exc).__name__}: {exc}"
 
     def search(self, query: str, top_k: int = 5, min_score: float = 0.0) -> list[dict[str, Any]]:
-        if not normalize_text(query):
+        candidates = self.recall(query, top_k)
+        return self.rank(query, [("", item) for item in candidates], top_k, min_score)
+
+    def recall(self, query: str, top_k: int) -> list[SearchCandidate]:
+        query = normalize_text(query)
+        if not query:
             raise ValueError("query must not be empty")
         if not self.records:
             return []
         top_k = max(1, min(int(top_k), 100))
-        candidate_k = max(top_k * int(os.environ.get("QA_RETRIEVAL_CANDIDATE_MULTIPLIER", "8")), top_k, 20)
-        query_text = normalize_text(query)
+        multiplier = int(os.environ.get("QA_RETRIEVAL_CANDIDATE_MULTIPLIER", "8"))
+        depth = max(20, top_k, min(top_k * multiplier, 256))
+        exact_indices = {index for identifier in paper_identifiers(query)
+                         for index in self.paper_lookup.get(identifier, ())}
+        if _identifier_only(query):
+            return [SearchCandidate(self.records[index], 0.0, 0.0, 0.0, 0.0)
+                    for index in sorted(exact_indices)[:depth]]
+        tokens = tokenize(query)
+        bm25 = _top_scores(self.bm25_index.get_scores(tokens), depth)
+        sparse = self._sparse_top(query, depth)
+        vector = self._vector_top(query, depth)
+        channels = (bm25, sparse, vector)
+        fused: dict[int, float] = defaultdict(float)
+        weight = (RRF_K + 1) / max(1, sum(bool(channel) for channel in channels))
+        for channel in channels:
+            for rank, index in enumerate(channel, start=1):
+                fused[index] += weight / (RRF_K + rank)
+        for index in exact_indices:
+            fused.setdefault(index, 0.0)
+        ranked = sorted(fused, key=lambda index: (index not in exact_indices, -fused[index], index))[:depth]
+        return [
+            SearchCandidate(self.records[index], fused[index], bm25.get(index, 0.0),
+                            sparse.get(index, 0.0), vector.get(index, 0.0))
+            for index in ranked
+        ]
 
-        bm25_scores = self._bm25_scores(query_text)
-        sparse_scores = self._sparse_scores(query_text)
-        vector_scores = self._vector_scores(query_text)
+    def rank(
+        self, query: str, candidates: list[tuple[str, SearchCandidate]], top_k: int, min_score: float,
+        *, corpora: list[BM25Index] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Use common lexical features and one optional rerank pass across the selected libraries."""
+        query = normalize_text(query)
+        terms = sorted(set(tokenize(query)))
+        indexes = corpora or [self.bm25_index]
+        doc_count = sum(index.document_count for index in indexes)
+        weights = {
+            term: math.log1p((doc_count + 0.5) / (sum(len(index.postings.get(term, ())) for index in indexes) + 0.5))
+            for term in terms
+        }
+        total_weight = sum(weights.values()) or 1
+        identifiers = paper_identifiers(query)
+        ranked = []
+        for library, candidate in candidates:
+            record = candidate.record
+            candidate_terms = set(tokenize(lexical_text(record)))
+            matched_terms = [term for term in terms if term in candidate_terms]
+            overlap = len(matched_terms) / max(1, len(terms))
+            weighted_overlap = sum(weights[term] for term in matched_terms) / total_weight
+            exact = bool(identifiers & _paper_aliases(record.paper_key))
+            score = 0.55 * candidate.rrf_score + 0.25 * overlap + 0.20 * weighted_overlap
+            ranked.append((library, candidate, exact, score, overlap))
 
-        candidate_indices = self._candidate_indices([bm25_scores, sparse_scores, vector_scores], candidate_k)
-        rerank_scores = self._rerank_scores(query_text, candidate_indices)
+        def rank_key(row):
+            library, candidate, exact, score, _ = row
+            return (-exact, -score, library, candidate.record.doc_id, candidate.record.pair_id)
 
-        bm25_norm = self._normalize_scores(bm25_scores)
-        sparse_norm = self._normalize_scores(sparse_scores)
-        vector_norm = self._normalize_scores(vector_scores)
-        rerank_norm = self._normalize_scores(rerank_scores)
+        ranked.sort(key=rank_key)
+        if self.reranker is not None and ranked:
+            depth = max(40, min(int(top_k), 100))
+            window = ranked[:depth]
+            try:
+                predictions = np.asarray(self.reranker.predict(
+                    [[query, lexical_text(candidate.record)] for _, candidate, _, _, _ in window]
+                ), dtype=float)
+                if predictions.shape != (len(window),) or not np.isfinite(predictions).all():
+                    raise ValueError("invalid cross-encoder scores")
+                if predictions.max() > predictions.min():
+                    ranks = np.empty(len(window), dtype=int)
+                    ranks[np.argsort(-predictions, kind="stable")] = np.arange(len(window))
+                    ranked = [
+                        (library, candidate, exact,
+                         0.8 * score + 0.2 * (RRF_K + 1) / (RRF_K + 1 + ranks[index]), float(predictions[index]))
+                        for index, (library, candidate, exact, score, _) in enumerate(window)
+                    ] + [(library, candidate, exact, 0.8 * score, overlap)
+                         for library, candidate, exact, score, overlap in ranked[depth:]]
+                    ranked.sort(key=rank_key)
+            except Exception as exc:
+                self.reranker_error = f"{type(exc).__name__}: {exc}"
 
-        results: list[SearchResult] = []
-        for index in candidate_indices:
-            final_score = (
-                0.35 * bm25_norm[index]
-                + 0.15 * sparse_norm[index]
-                + 0.35 * vector_norm[index]
-                + 0.15 * rerank_norm[index]
-            )
-            if final_score >= min_score and final_score > 0:
-                results.append(
-                    SearchResult(
-                        record=self.records[index],
-                        score=final_score,
-                        bm25_score=float(bm25_scores[index]),
-                        vector_score=float(vector_scores[index]),
-                        rerank_score=float(rerank_scores[index]),
-                    )
-                )
-        results.sort(key=lambda item: (item.score, item.record.doc_id, item.record.pair_id), reverse=True)
-        return [result.public() for result in results[:top_k]]
+        results = []
+        library_ranks: Counter[str] = Counter()
+        limit = max(1, min(int(top_k), 100))
+        for library, candidate, exact, score, rerank in ranked:
+            score = 1.0 if exact else score
+            if score < min_score or score <= 0:
+                continue
+            result = candidate.public(score, rerank)
+            if library:
+                library_ranks[library] += 1
+                result.update(knowledge_base_id=library, retrieval_rank=library_ranks[library])
+            results.append(result)
+            if len(results) >= limit:
+                break
+        return results
 
-    def _bm25_scores(self, query: str) -> np.ndarray:
-        if self.bm25_index is None:
-            return np.zeros(len(self.records), dtype=float)
-        return np.asarray(self.bm25_index.get_scores(tokenize(query)), dtype=float)
-
-    def _sparse_scores(self, query: str) -> np.ndarray:
+    def _sparse_top(self, query: str, depth: int) -> dict[int, float]:
         if self.sparse_matrix is None or self.sparse_vectorizer is None:
-            return np.zeros(len(self.records), dtype=float)
+            return {}
         query_vector = self.sparse_vectorizer.transform([query])
-        return query_vector.dot(self.sparse_matrix.T).toarray().ravel()
+        scores = query_vector.dot(self.sparse_matrix.T).toarray().ravel()
+        return _top_scores(scores, depth)
 
-    def _vector_scores(self, query: str) -> np.ndarray:
+    def _vector_top(self, query: str, depth: int) -> dict[int, float]:
         if self.faiss_index is None or self.embedding_model is None:
-            return np.zeros(len(self.records), dtype=float)
+            return {}
         query_embedding = self._query_embedding(query)
-        if query_embedding is None:
-            return np.zeros(len(self.records), dtype=float)
-        scores = np.zeros(len(self.records), dtype=float)
-        raw_scores, raw_indices = self.faiss_index.search(query_embedding, len(self.records))
-        for score, index in zip(raw_scores[0], raw_indices[0]):
-            if index >= 0:
-                scores[index] = float(score)
-        return scores
+        if query_embedding is None or query_embedding.shape != (1, self.faiss_index.d):
+            return {}
+        scores, indices = self.faiss_index.search(query_embedding, min(depth, self.faiss_index.ntotal))
+        minimum = float(os.environ.get("QA_VECTOR_MIN_SIMILARITY", "0.25"))
+        return {int(index): float(score) for score, index in zip(scores[0], indices[0])
+                if index >= 0 and np.isfinite(score) and score >= minimum}
 
     def _query_embedding(self, query: str) -> np.ndarray | None:
         cached = self._cache.get(query)
         if cached is not None:
+            self._cache.move_to_end(query)
             return cached
         try:
             embedding = self.embedding_model.encode([query], show_progress_bar=False, normalize_embeddings=True)
             vector = np.asarray(embedding, dtype="float32")
-        except Exception:
+        except Exception as exc:
+            self.model_error = f"{type(exc).__name__}: {exc}"
             return None
         self._cache[query] = vector
+        if len(self._cache) > QUERY_CACHE_SIZE:
+            self._cache.popitem(last=False)
         return vector
-
-    @staticmethod
-    def _candidate_indices(score_arrays: list[np.ndarray], candidate_k: int) -> list[int]:
-        selected: set[int] = set()
-        for scores in score_arrays:
-            if scores.size == 0:
-                continue
-            limit = min(candidate_k, scores.size)
-            ranked = np.argsort(scores)[-limit:]
-            selected.update(int(index) for index in ranked if scores[index] > 0)
-        if selected:
-            return sorted(selected)
-        return list(range(min(candidate_k, score_arrays[0].size if score_arrays else 0)))
-
-    def _rerank_scores(self, query: str, candidate_indices: list[int]) -> np.ndarray:
-        scores = np.zeros(len(self.records), dtype=float)
-        if not candidate_indices:
-            return scores
-        if self.reranker is not None:
-            pairs = [[query, self.corpus[index]] for index in candidate_indices]
-            try:
-                predictions = self.reranker.predict(pairs)
-                for index, score in zip(candidate_indices, predictions):
-                    scores[index] = float(score)
-                return scores
-            except Exception as exc:
-                self.reranker_error = f"{type(exc).__name__}: {exc}"
-        for index in candidate_indices:
-            scores[index] = self._lightweight_rerank(query, self.records[index])
-        return scores
-
-    @staticmethod
-    def _lightweight_rerank(query: str, record: Record) -> float:
-        query_tokens = set(tokenize(query))
-        question_tokens = set(tokenize(record.question))
-        answer_tokens = set(tokenize(record.answer))
-        overlap = len(query_tokens & (question_tokens | answer_tokens))
-        phrase_bonus = 3.0 if normalize_text(query).lower() in record.question.lower() else 0.0
-        answer_bonus = 1.5 * len(query_tokens & answer_tokens)
-        return float(overlap + phrase_bonus + answer_bonus)
-
-    @staticmethod
-    def _normalize_scores(scores: np.ndarray) -> np.ndarray:
-        if scores.size == 0:
-            return scores
-        finite_scores = np.nan_to_num(scores.astype(float), nan=0.0, posinf=0.0, neginf=0.0)
-        min_score = float(finite_scores.min())
-        max_score = float(finite_scores.max())
-        if max_score <= min_score:
-            if max_score > 0:
-                return np.where(finite_scores > 0, 1.0, 0.0)
-            return np.zeros_like(finite_scores, dtype=float)
-        return (finite_scores - min_score) / (max_score - min_score)
 
     def get(self, doc_id: str, pair_id: int) -> dict[str, Any] | None:
         for record in self.records:
@@ -572,12 +677,13 @@ class KnowledgeBase:
             "source_name": self.source_path.name,
             "record_count": len(self.records),
             "doc_count": len({record.doc_id for record in self.records}),
-            "bm25_backend": "rank_bm25" if BM25Okapi is not None else "fallback",
+            "bm25_backend": "inverted_bm25",
             "embedding_model": self.embedding_model_name if self.embedding_model is not None else None,
             "reranker_model": self.reranker_model_name if self.reranker is not None else None,
             "has_bm25_index": self.bm25_index is not None,
             "has_sparse_index": self.sparse_matrix is not None,
             "has_faiss_index": self.faiss_index is not None,
+            "index_error": self.index_error,
             "model_error": self.model_error,
             "reranker_error": self.reranker_error,
         }

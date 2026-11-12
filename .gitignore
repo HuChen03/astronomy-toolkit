@@ -28,7 +28,8 @@ dist/
 /cosmo-agent/data/
 /cosmo-agent/runs/
 /cosmo-agent/sources/
-/cosmo-agent/environments/site*.yaml
+/cosmo-agent/environments/*
+!/cosmo-agent/environments/local.yaml
 *.log
 *.sqlite
 *.sqlite3

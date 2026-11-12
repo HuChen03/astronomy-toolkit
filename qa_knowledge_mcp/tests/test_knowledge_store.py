@@ -54,10 +54,30 @@ class KnowledgeStoreTests(unittest.TestCase):
             claimed = store.claim_task(stage="align_evidence")
             self.assertEqual(claimed["task_id"], task_id)
             self.assertEqual(claimed["payload"]["paper_id"], "paper-1")
-            self.assertTrue(store.fail_task(task_id, "temporary", retry_delay_seconds=0))
-            self.assertEqual(store.claim_task()["attempts"], 2)
-            self.assertTrue(store.fail_task(task_id, "permanent"))
+            self.assertTrue(store.fail_task(task_id, "temporary", lease_token=claimed["lease_token"], retry_delay_seconds=0))
+            reclaimed = store.claim_task()
+            self.assertEqual(reclaimed["attempts"], 2)
+            self.assertTrue(store.fail_task(task_id, "permanent", lease_token=reclaimed["lease_token"]))
             self.assertEqual(store.list_tasks(status="dead_letter")[0]["task_id"], task_id)
+
+
+    def test_expired_lease_recovers_and_old_worker_cannot_finish(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = KnowledgeStore(Path(directory) / "store.sqlite3")
+            task_id = store.enqueue_task(stage="import_documents", idempotency_key="doc-1", input_hash="demo")
+            first = store.claim_task()
+            self.assertTrue(store.renew_task(task_id, first["lease_token"]))
+            self.assertIsNone(store.claim_task())
+            with store.connect() as connection:
+                connection.execute("UPDATE processing_tasks SET lease_expires_at=? WHERE task_id=?",
+                                   ("2000-01-01T00:00:00+00:00", task_id))
+            restarted = KnowledgeStore(store.path)
+            second = restarted.claim_task()
+            self.assertEqual(second["attempts"], 2)
+            self.assertNotEqual(first["lease_token"], second["lease_token"])
+            self.assertFalse(store.finish_task(task_id, lease_token=first["lease_token"]))
+            self.assertFalse(store.fail_task(task_id, "late", lease_token=first["lease_token"]))
+            self.assertTrue(restarted.finish_task(task_id, lease_token=second["lease_token"]))
 
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
 """Foreground and background process execution."""
 from __future__ import annotations
 
-import os
 import json
+import os
 import signal
 import subprocess
 import sys
@@ -11,20 +11,45 @@ from pathlib import Path
 
 from .config import Config
 from .ledger import Ledger
-from .policy import ExecPolicy
+from .policy import HTTP_TOKEN_VAR
 
 HEAD_BYTES = 32 * 1024
 TAIL_BYTES = 32 * 1024
 DEFAULT_TIMEOUT_S = 300
 MAX_TIMEOUT_S = 3600
+STOP_WAIT_S = 10
 
 
 def _process_identity(pid):
     try:
         # Linux /proc stat field 22, after a command name that may contain spaces.
         return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[19]
-    except (FileNotFoundError, ProcessLookupError):
+    except (OSError, IndexError):
         return None
+
+
+def _boot_id() -> str | None:
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except OSError:
+        return None
+
+
+def _group_alive(pid: int) -> bool:
+    try:
+        os.killpg(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    # A supervisor owned by another MCP session can still be a zombie.
+    # Check group members so an exited group is not reported as still running.
+    try:
+        rows = subprocess.check_output(["/bin/ps", "-axo", "pgid=,stat="], text=True, timeout=2)
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return any(group == str(pid) and not status.startswith("Z")
+               for group, status in (line.split() for line in rows.splitlines() if line.strip()))
 
 
 def _read_summary(path: Path) -> tuple[str, dict]:
@@ -76,14 +101,12 @@ class ProcessManager:
         self._live: dict[str, subprocess.Popen] = {}
         self.policy = config.exec_policy
 
-    def _enforce_policy(self, argv, command, shell) -> None:
-        """Apply the server command policy; every rejection is audited.
-
-        Runs before cwd validation and before any run directory is created, so a
-        rejected command leaves the ledger clean apart from its audit line.
-        """
+    def _prepare_command(self, argv, command, shell, env_extra):
+        cmd = self._build_cmd(argv, command, shell)
         try:
             self.policy.check(argv=argv, command=command, shell=shell)
+            resolved = ["/bin/bash", "-c", cmd] if shell else self.policy.bind(cmd)
+            return resolved, self.policy.environment(env_extra)
         except PermissionError as exc:
             self.ledger.audit('exec_denied', reason=str(exc), argv=argv,
                               command=command if shell else None, shell=shell)
@@ -107,18 +130,13 @@ class ProcessManager:
         env_extra: dict[str, str] | None = None,
         timeout: int = DEFAULT_TIMEOUT_S,
     ) -> dict:
-        self._enforce_policy(argv, command, shell)
+        cmd, env = self._prepare_command(argv, command, shell, env_extra)
         cwd_path = self.config.check_path(cwd or self.config.allowed_roots[0])
         if cwd_path and not cwd_path.is_dir():
             raise FileNotFoundError(f"cwd does not exist or is not a directory: {cwd_path}")
-        cmd = self._build_cmd(argv, command, shell)
         timeout = max(1, min(int(timeout), MAX_TIMEOUT_S))
-        env = os.environ.copy()
-        if env_extra:
-            env.update({str(k): str(v) for k, v in env_extra.items()})
-
         run_id, rdir = self.ledger.create(
-            argv=argv if not shell else ["bash", "-c", command],
+            argv=cmd,
             cwd=cwd_path or Path.cwd(),
             shell=shell,
             env_extra=env_extra,
@@ -129,8 +147,8 @@ class ProcessManager:
         timed_out = False
         with stdout_path.open('wb') as stdout, stderr_path.open('wb') as stderr:
             try:
-                proc = subprocess.Popen(cmd, shell=shell, executable='/bin/bash' if shell else None,
-                                        cwd=cwd_path, env=env, stdout=stdout, stderr=stderr,
+                proc = subprocess.Popen(cmd, cwd=cwd_path, env=env, stdin=subprocess.DEVNULL,
+                                        stdout=stdout, stderr=stderr,
                                         start_new_session=True)
                 self.ledger.update_meta(run_id, pid=proc.pid)
                 try:
@@ -172,17 +190,12 @@ class ProcessManager:
         cwd: str | None = None,
         env_extra: dict[str, str] | None = None,
     ) -> dict:
-        self._enforce_policy(argv, command, shell)
+        cmd, env = self._prepare_command(argv, command, shell, env_extra)
         cwd_path = self.config.check_path(cwd or self.config.allowed_roots[0])
         if cwd_path and not cwd_path.is_dir():
             raise FileNotFoundError(f"cwd does not exist or is not a directory: {cwd_path}")
-        cmd = self._build_cmd(argv, command, shell)
-        env = os.environ.copy()
-        if env_extra:
-            env.update({str(k): str(v) for k, v in env_extra.items()})
-
         run_id, rdir = self.ledger.create(
-            argv=argv if not shell else ["bash", "-c", command],
+            argv=cmd,
             cwd=cwd_path or Path.cwd(),
             shell=shell,
             env_extra=env_extra,
@@ -190,18 +203,32 @@ class ProcessManager:
         )
         (rdir / 'stdout.log').touch()
         (rdir / 'stderr.log').touch()
+        supervisor_env = os.environ.copy()
+        supervisor_env.pop(HTTP_TOKEN_VAR, None)
         try:
             proc = subprocess.Popen(
-                [sys.executable, str(Path(__file__).with_name('worker.py')), str(rdir)],
-                cwd=cwd_path, env=env, stdin=subprocess.DEVNULL,
+                [sys.executable, "-I", str(Path(__file__).with_name('worker.py')), str(rdir)],
+                cwd=cwd_path, env=supervisor_env, stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
         except OSError as exc:
             self.ledger.update_meta(run_id, exit_code=127, finished_at=time.time(), spawn_error=str(exc))
             raise
+        try:
+            with proc.stdin as pipe:
+                pipe.write(json.dumps({"argv": cmd, "env": env}).encode())
+        except OSError as exc:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait()
+            self.ledger.update_meta(run_id, exit_code=127, finished_at=time.time(), spawn_error=str(exc))
+            raise
         self._live[run_id] = proc
-        self.ledger.update_meta(run_id, pid=proc.pid, supervisor=True, pid_start_ticks=_process_identity(proc.pid))
+        self.ledger.update_meta(run_id, pid=proc.pid, supervisor=True, pid_start_ticks=_process_identity(proc.pid),
+                                pid_boot_id=_boot_id())
         return {
             "run_id": run_id,
             "pid": proc.pid,
@@ -214,39 +241,48 @@ class ProcessManager:
             "a Slurm job ID (if any) is separate and recorded in meta.json once known",
         }
 
+    def _owns_supervisor(self, run_id: str, meta: dict) -> bool:
+        pid = meta.get("pid")
+        if not pid or not meta.get("supervisor"):
+            return False
+        proc = self._live.get(run_id)
+        if proc is not None:
+            return proc.poll() is None
+        if not meta.get("pid_start_ticks") or _process_identity(pid) != meta["pid_start_ticks"]:
+            return False
+        if meta.get("pid_boot_id") and meta["pid_boot_id"] != _boot_id():
+            return False
+        try:
+            args = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+            return os.fsencode(str(self.ledger.dir(run_id))) in args and os.getpgid(pid) == pid
+        except OSError:
+            return False
+
     def _refresh(self, run_id: str) -> dict:
         meta = self.ledger.read_meta(run_id)
         proc = self._live.get(run_id)
-        result_file = self.ledger.dir(run_id) / 'result.json'
-        if result_file.exists():
-            if proc is not None:
-                proc.poll()  # Reap the supervisor if it has exited.
-            if meta['finished_at'] is None:
-                meta = self.ledger.update_meta(run_id, **json.loads(result_file.read_text()))
-            return meta
-        if proc is not None and meta["exit_code"] is None:
-            rc = proc.poll()
-            if rc is not None:
-                if result_file.exists():
-                    self.ledger.update_meta(run_id, **json.loads(result_file.read_text()))
-                else:
-                    self.ledger.update_meta(run_id, exit_code=rc if rc else 127, finished_at=time.time(),
-                                            **({'status_note': 'supervisor exited without terminal result; inspect logs'} if meta.get('supervisor') else {}))
-                meta = self.ledger.read_meta(run_id)
-        elif proc is None and meta["exit_code"] is None and meta.get("pid"):
-            # server restarted (or process orphaned): check liveness by pid
-            try:
-                os.kill(meta["pid"], 0)
-                meta["status_note"] = "process alive (tracked by pid after server restart)"
-            except ProcessLookupError:
-                meta["status_note"] = (
-                    "process not running but exit code unknown (server restarted); "
-                    "inspect log files and, for Slurm jobs, sacct/squeue"
-                )
-                meta["exit_code"] = None
-            except PermissionError:
-                meta["status_note"] = "process exists but owned by another user"
-        return meta
+        code = proc.poll() if proc is not None else None
+        if code is not None:
+            self._live.pop(run_id, None)
+        result = self.ledger.dir(run_id) / 'result.json'
+        if meta["finished_at"] is None and result.is_file():
+            meta = self.ledger.update_meta(run_id, **json.loads(result.read_text()))
+        elif meta["finished_at"] is None and code is not None:
+            meta = self.ledger.update_meta(
+                run_id, exit_code=code or 127, finished_at=time.time(),
+                status_note='supervisor exited without terminal result; inspect logs',
+            )
+
+        if meta["finished_at"] is not None:
+            status = "timed_out" if meta.get("timed_out") else "exited"
+        elif self._owns_supervisor(run_id, meta):
+            status = "stopping" if meta.get("stop_requested_at") else "running"
+        else:
+            status = "unknown"
+        return self.ledger.public_meta({**meta, "status": status})
+
+    def list_runs(self, limit: int = 20) -> list[dict]:
+        return [self._refresh(meta["run_id"]) for meta in self.ledger.list_runs(max(1, min(limit, 200)))]
 
     def read_output(self, run_id: str, offset: int = 0, max_bytes: int = 64 * 1024,
                     stderr_offset: int | None = None) -> dict:
@@ -281,29 +317,27 @@ class ProcessManager:
         return result
 
     def stop(self, run_id: str, sig: int = signal.SIGTERM) -> dict:
+        if sig not in {signal.SIGTERM, signal.SIGINT, signal.SIGKILL}:
+            raise ValueError("stop accepts SIGTERM, SIGINT, or SIGKILL")
         meta = self._refresh(run_id)
-        if meta["exit_code"] is not None:
-            return {"run_id": run_id, "stopped": False, "reason": "already finished", "meta": meta}
-        pid = meta.get("pid")
-        proc = self._live.get(run_id)
-        if proc is not None:
-            try:
-                os.killpg(os.getpgid(proc.pid), sig)
-            except ProcessLookupError:
-                pass
-        elif pid:
-            if not meta.get('pid_start_ticks') or _process_identity(pid) != meta['pid_start_ticks']:
-                return {'run_id': run_id, 'stopped': False, 'reason': 'process identity cannot be verified after reconnect', 'meta': meta}
-            try:
-                os.killpg(os.getpgid(pid), sig)
-            except (ProcessLookupError, PermissionError) as exc:
-                return {"run_id": run_id, "stopped": False, "reason": str(exc), "meta": meta}
-        else:
-            return {"run_id": run_id, "stopped": False, "reason": "no pid recorded", "meta": meta}
-        deadline = time.time() + 10
-        while time.time() < deadline:
+        response = {"run_id": run_id, "stopped": False, "signal_sent": False}
+        if meta["finished_at"] is not None:
+            return {**response, "reason": "already finished", "meta": meta}
+        if not self._owns_supervisor(run_id, meta):
+            return {**response, "reason": "process identity cannot be verified", "meta": meta}
+        pid = meta["pid"]
+        try:
+            os.killpg(pid, sig)
+        except (ProcessLookupError, PermissionError) as exc:
+            return {**response, "reason": str(exc), "meta": self._refresh(run_id)}
+
+        self.ledger.update_meta(run_id, stop_requested_at=time.time())
+        response["signal_sent"] = True
+        deadline = time.monotonic() + STOP_WAIT_S
+        while True:
             meta = self._refresh(run_id)
-            if meta["exit_code"] is not None:
-                break
-            time.sleep(0.2)
-        return {"run_id": run_id, "stopped": True, "meta": self.ledger.read_meta(run_id)}
+            if meta["status"] != "stopping" and not _group_alive(pid):
+                return {**response, "stopped": True, "meta": meta}
+            if time.monotonic() >= deadline:
+                return {**response, "reason": "process group still exists", "meta": meta}
+            time.sleep(0.1)

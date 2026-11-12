@@ -42,7 +42,8 @@ exec:
   builtin_deny_patterns: true     # 内置拒绝表；唯一能整表关掉它的开关
   disabled_deny_patterns: []      # 按名字停掉某几条内置规则（名字见 env_info.exec_policy.deny_patterns）
   deny_patterns: []               # 在内置表之上【追加】自定义正则；空列表不会关掉内置表
-  allow_commands: []              # 非空 = 白名单模式（argv[0] basename），并自动禁止 shell=true
+  allow_commands: []              # 支持绝对路径，命令名按服务端 PATH 解析，禁用 shell=true
+  allow_env: []                   # 白名单模式下允许追加的作业环境变量名
 ```
 
 - **命令策略**（`mcp_server/src/cosmo_exec/policy.py`）：`exec_run`/`exec_start` 在创建任何进程之前过一遍
@@ -55,6 +56,10 @@ exec:
   `file_write_denied` 审计；`file_read`/`file_list` 不受影响（读源码用于排障仍然可以）。
 - **审计**：文件写入与策略拒绝按行追加到 `<state_dir>/audit.jsonl`（JSON Lines，含时间戳／pid／事件）；
   `env_info` 返回 `audit_log`、`exec_policy`、`protected_paths` 便于核对。
+- **运行账本**：客户端环境变量只记录变量名，值统一显示为 `[redacted]`。在白名单模式下可传入线程数等
+  作业参数，`PATH`、加载器和 Python 启动相关变量由服务端控制。原始元数据和审计日志由运维账号直接读取。
+- **停止状态**：`exec_stop` 的 `signal_sent` 表示已发出信号，`stopped` 表示进程组已退出。
+  等待超时后可继续用 `run_get` 或 `run_list` 查询。Slurm 任务仍以调度器状态为准。
 - **误报怎么放行**：内置规则的名字会出现在报错与 `env_info.exec_policy.deny_patterns` 里，让用户在清单
   `exec.disabled_deny_patterns` 里点名停掉那一条即可（不是放宽整表）；整表关闭只能靠显式的
   `builtin_deny_patterns: false`。
@@ -63,6 +68,10 @@ exec:
   `--protected-path PATH`。
 
 ## 2. 客户端配置
+
+HTTP 绑定非回环地址时，服务进程需要从部署环境读取 `COSMO_EXEC_HTTP_TOKEN`，
+客户端需发送 `Authorization: Bearer …`。经反向代理发布时使用 HTTPS。共享一个执行服务的客户端共享
+同一 OS 权限及账本。跨信任边界使用独立服务实例、低权限账号与文件系统隔离。
 
 支持 MCP 的 Agent 客户端（Claude Code / Desktop、Kimi Code 等）注册：
 
@@ -105,6 +114,8 @@ python3 scripts/mcp_cli.py file_list path=runs
 python3 scripts/mcp_cli.py exec_run '{"argv":["rg","-n","OutputListOn","sources/Gadget4/documentation"],"cwd":"."}'
 # 附着到已在运行的 HTTP 服务（不新起进程、不占用端口）
 python3 scripts/mcp_cli.py --url http://127.0.0.1:8787/mcp env_info
+# 连接需要认证的服务，令牌取自当前进程环境。
+python3 scripts/mcp_cli.py --url https://mcp.example.org/mcp --token-env COSMO_EXEC_HTTP_TOKEN env_info
 ```
 
 参数给 JSON 对象、`key=value` 对，或 `-`（从 stdin 读 JSON）；非合法 JSON 的值按字符串处理。

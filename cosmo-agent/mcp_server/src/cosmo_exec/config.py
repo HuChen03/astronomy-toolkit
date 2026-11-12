@@ -32,7 +32,8 @@ class Config:
         self.allowed_roots = [root.expanduser().resolve() for root in self.allowed_roots]
         # Server-owned files stay writable only by the operator: a client that
         # could rewrite them would be able to widen its own boundary.
-        protected = [Path(__file__).resolve().parent, self.state_dir / 'audit.jsonl']
+        protected = [Path(__file__).resolve().parent, self.state_dir / 'audit.jsonl', self.state_dir / 'runs']
+        protected.extend(path for commands in self.exec_policy.executables.values() for path in commands)
         if self.manifest_path:
             protected.append(Path(self.manifest_path).expanduser().resolve())
         protected.extend(path.expanduser().resolve() for path in self.protected_paths)

@@ -27,12 +27,12 @@ class LabKnowledgeSearch:
         candidate_k = max(20, min(100, top_k * 4))
         if "qa" in allowed:
             qa_results = []
-            for item in self.knowledge_base.search(query, top_k=candidate_k, min_score=min_score):
+            items = self.knowledge_base.search(query, top_k=candidate_k, min_score=min_score)
+            annotations = self.store.qa_matches(items) if self.store else [None] * len(items)
+            for item, details in zip(items, annotations):
                 enriched = {**item, "source_type": "qa", "knowledge_type": "model_summary"}
-                if self.store:
-                    details = self.store.qa_details(item["doc_id"], int(item["pair_id"]))
-                    if details:
-                        enriched.update({"paper_id": details["paper_id"], "qa_id": details["qa_id"], "qa_version_id": details["qa_version_id"], "review_status": details["review_status"], "knowledge_type": details["knowledge_type"], "evidence": [self._public_evidence(row) for row in self.store.evidence_for_qa_version(details["qa_version_id"])]})
+                if self.store and details:
+                    enriched.update({"paper_id": details["paper_id"], "qa_id": details["qa_id"], "qa_version_id": details["qa_version_id"], "review_status": details["review_status"], "knowledge_type": details["knowledge_type"], "evidence": [self._public_evidence(row) for row in self.store.evidence_for_qa_version(details["qa_version_id"])]})
                 qa_results.append(enriched)
             ranked_lists.append(qa_results)
         if self.store and "evidence" in allowed:

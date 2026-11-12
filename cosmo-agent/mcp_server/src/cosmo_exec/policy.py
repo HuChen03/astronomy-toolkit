@@ -25,10 +25,14 @@ user, in a container, against filesystems that user cannot destroy.
 from __future__ import annotations
 
 import re
+import os
+import shutil
 from pathlib import Path
 
 # Executables whose name must match exactly (argv[0] basename allowlist).
 SHELL_NAMES = {"sh", "bash", "dash", "zsh", "ksh", "ash", "busybox"}
+JOB_ENV = {"OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS", "CUDA_VISIBLE_DEVICES"}
+HTTP_TOKEN_VAR = "COSMO_EXEC_HTTP_TOKEN"
 
 # Words a destructive command can hide behind: `sudo nice xargs rm ...`.
 _WRAPPERS = (
@@ -107,10 +111,19 @@ def command_texts(argv: list[str] | None, command: str | None, shell: bool) -> l
 class ExecPolicy:
     """Compiled deny patterns plus optional allowlist/shell switch."""
 
-    def __init__(self, patterns=(), allow_commands=(), allow_shell: bool = True):
+    def __init__(self, patterns=(), allow_commands=(), allow_shell: bool = True, allow_env=()):
         self.patterns = tuple(patterns)
         self.allow_commands = tuple(allow_commands)
-        self.allow_shell = allow_shell
+        self.allow_shell = allow_shell and not self.allow_commands
+        self.allow_env = JOB_ENV | set(allow_env)
+        self.trusted_path = os.pathsep.join(
+            directory for directory in os.get_exec_path() if Path(directory).is_absolute()
+        )
+        self.executables: dict[str, set[Path]] = {}
+        for command in self.allow_commands:
+            resolved = shutil.which(command, path=self.trusted_path) if "/" not in command or Path(command).is_absolute() else None
+            if resolved:
+                self.executables.setdefault(Path(command).name, set()).add(Path(resolved).resolve())
         self._compiled = [
             (name, re.compile(regex, re.IGNORECASE)) for name, regex in self.patterns
         ]
@@ -156,7 +169,7 @@ class ExecPolicy:
         if allow_shell is None:
             allow_shell = section.get("allow_shell", True)
         return cls(patterns=tuple(patterns), allow_commands=tuple(allow_commands),
-                   allow_shell=bool(allow_shell) and not allow_commands)
+                   allow_shell=bool(allow_shell), allow_env=section.get("allow_env") or ())
 
     def describe(self) -> dict:
         return {
@@ -177,7 +190,7 @@ class ExecPolicy:
 
         if self.allow_commands:
             name = Path(argv[0]).name if argv else None
-            if name not in self.allow_commands:
+            if name not in {Path(item).name for item in self.allow_commands}:
                 raise PermissionError(
                     f"executable {name!r} is not in the server allowlist "
                     f"({list(self.allow_commands)}); ask the operator to extend "
@@ -195,3 +208,30 @@ class ExecPolicy:
                         "exec.disabled_deny_patterns (or builtin_deny_patterns: false) "
                         "in the environment manifest."
                     )
+
+    def bind(self, argv: list[str]) -> list[str]:
+        if not self.allow_commands:
+            return argv
+        executable = Path(argv[0])
+        approved = self.executables.get(executable.name, set())
+        if executable.is_absolute() and executable.resolve() in approved:
+            return [str(executable.resolve()), *argv[1:]]
+        if "/" not in argv[0] and len(approved) == 1:
+            return [str(next(iter(approved))), *argv[1:]]
+        raise PermissionError(f"executable {argv[0]!r} does not resolve to one approved path")
+
+    def environment(self, additions: dict[str, str] | None) -> dict[str, str]:
+        additions = additions or {}
+        env = os.environ.copy()
+        env.pop(HTTP_TOKEN_VAR, None)
+        if HTTP_TOKEN_VAR in additions:
+            raise PermissionError(f"environment overrides are prohibited for {HTTP_TOKEN_VAR}")
+        if self.allow_commands:
+            forbidden = set(additions) - self.allow_env
+            forbidden.update(key for key in additions if key.upper().startswith(("LD_", "DYLD_", "PYTHON"))
+                             or key.upper() in {"PATH", "BASH_ENV", "ENV", HTTP_TOKEN_VAR})
+            if forbidden:
+                raise PermissionError(f"environment overrides are prohibited for {', '.join(sorted(forbidden))}")
+            env["PATH"] = self.trusted_path
+        env.update(additions)
+        return env

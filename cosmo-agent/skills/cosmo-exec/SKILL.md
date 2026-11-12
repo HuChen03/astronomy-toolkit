@@ -69,10 +69,10 @@ metadata:
   不传则从 0 起（每次都会重放，重复比丢数据安全）。返回的 `{stream}_info` 里有
   `total_bytes` / `offset` / `next_offset` / `eof`；传越界 `offset` 会被**静默夹到文件末尾**，不报错。
 - 被信号终止的进程，`exit_code` 是**负的信号号**（SIGTERM → `-15`），不是 143，也不代表"出错"。
-- 没有 `status` 字段：判断是否还在跑，看 `exit_code == null && finished_at == null`；
-  `status_note` 只在服务端重启后按 pid 复核存活时出现。
-- `exec_stop` 会阻塞最多约 10 s 等终态退出码；已经结束、没记 pid、或重启后无法校验身份时返回
-  `stopped: false` + `reason`，此时去 `run_get` 看终态，别重复杀。
+- `status` 表示本地进程状态。可能值为 `running`、`stopping`、`exited`、`timed_out` 和 `unknown`。
+  已提交的 Slurm 作业状态用 `squeue` 或 `sacct` 查询。
+- `exec_stop` 最多等待约 10 秒。`signal_sent` 表示已发信号，`stopped` 表示确认进程组退出。
+  等待超时或身份无法校验时，继续用 `run_get` 或调度器核对。
 - `run_list` 默认 `limit=20`、上限 200，且账本**跨客户端共享**（同机多个 Agent 会互相把记录挤出前列）。
   找回旧作业时显式放大 `limit`，再按 `run_id`/`cwd` 过滤，不要只取默认页。
 

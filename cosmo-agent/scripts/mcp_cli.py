@@ -31,6 +31,7 @@ Options:
                             server another process started, or a remote login
                             node); no local socket setup, so this also works
                             where spawning servers is not permitted
+  --token-env NAME          read the attached server's bearer token from NAME
   --env PATH                environment manifest (default: environments/local.yaml)
   --state-dir PATH          ledger directory override
   --timeout S               per-call timeout in seconds (default: 300)
@@ -42,6 +43,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import os
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -83,13 +85,14 @@ def parse_args(tokens: list[str]) -> dict:
 
 
 @contextlib.asynccontextmanager
-async def connect(url: str, timeout: int):
+async def connect(url: str, timeout: int, token: str | None):
     """Attach to an existing streamable-HTTP MCP server (no local process)."""
     import httpx
     from mcp import ClientSession
     from mcp.client.streamable_http import streamable_http_client
 
-    async with httpx.AsyncClient(trust_env=False, timeout=timeout) as http_client:
+    headers = {"Authorization": f"Bearer {token}"} if token else None
+    async with httpx.AsyncClient(trust_env=False, timeout=timeout, headers=headers) as http_client:
         async with streamable_http_client(url, http_client=http_client) as (read, write, _):
             async with ClientSession(read, write,
                                      read_timeout_seconds=timedelta(seconds=timeout)) as session:
@@ -100,7 +103,10 @@ async def connect(url: str, timeout: int):
 async def run(args) -> int:
     manifest = args.env
     if args.url:
-        session_cm = connect(args.url, args.timeout)
+        token = os.environ.get(args.token_env) if args.token_env else None
+        if args.token_env and not token:
+            raise ValueError(f"no token in {args.token_env}")
+        session_cm = connect(args.url, args.timeout, token)
     else:
         session_cm = mcp_session(manifest, transport=args.transport, port=args.port, state=args.state_dir)
     async with session_cm as session:
@@ -123,6 +129,7 @@ def main() -> int:
     parser.add_argument('--port', type=int, default=8788)
     parser.add_argument('--env', type=Path, default=ROOT / 'environments' / 'local.yaml')
     parser.add_argument('--url', default=None, help='attach to a running MCP HTTP server')
+    parser.add_argument('--token-env', help='environment variable holding the attached server bearer token')
     parser.add_argument('--state-dir', type=Path, default=None)
     parser.add_argument('--timeout', type=int, default=300)
     parser.add_argument('--raw', action='store_true')
@@ -132,7 +139,7 @@ def main() -> int:
     args = parser.parse_args()
     args.call_args = parse_args(args.call)
     args.env = args.env.resolve()
-    if not args.env.is_file():
+    if not args.url and not args.env.is_file():
         raise SystemExit(f'manifest not found: {args.env}')
     try:
         return asyncio.run(run(args))

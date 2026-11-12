@@ -15,6 +15,7 @@ run directory, so they append one JSON line to <state_dir>/audit.jsonl instead.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import time
@@ -41,7 +42,7 @@ class Ledger:
             "argv": argv,
             "shell": shell,
             "cwd": str(cwd),
-            "env_extra": env_extra or {},
+            "env_extra": {key: "[redacted]" for key in (env_extra or {})},
             "background": background,
             "created_at": time.time(),
             "created_at_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -80,10 +81,22 @@ class Ledger:
 
     def update_meta(self, run_id: str, **fields) -> dict:
         rdir = self.dir(run_id)
-        meta = self.read_meta(run_id)
-        meta.update(fields)
-        self._write_meta(rdir, meta)
-        return meta
+        with (rdir / ".meta.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            meta = self.read_meta(run_id)
+            meta.update(fields)
+            public = self.public_meta(meta)
+            self._write_meta(rdir, public)
+            return public
+
+    @staticmethod
+    def public_meta(meta: dict) -> dict:
+        return {**meta, "env_extra": {key: "[redacted]" for key in (meta.get("env_extra") or {})}}
+
+    def is_private(self, path: Path) -> bool:
+        if path == self.audit_path:
+            return True
+        return self.runs_dir in path.parents and path.name in {"meta.json", "meta.json.tmp", ".meta.lock"}
 
     def list_runs(self, limit: int = 50) -> list[dict]:
         runs = []
@@ -92,7 +105,7 @@ class Ledger:
                 continue
             try:
                 with open(rdir / "meta.json") as fh:
-                    runs.append(json.load(fh))
+                    runs.append(self.public_meta(json.load(fh)))
             except (OSError, json.JSONDecodeError):
                 continue
             if len(runs) >= limit:

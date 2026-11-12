@@ -8,9 +8,11 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
+from uuid import uuid4
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
+DEFAULT_TASK_LEASE_SECONDS = 120
 TOKEN_RE = re.compile(r"[A-Za-z0-9_]{2,}|[\u3400-\u9fff]{2,}")
 
 
@@ -146,6 +148,8 @@ class KnowledgeStore:
                     result_json TEXT,
                     available_at TEXT,
                     locked_at TEXT,
+                    lease_token TEXT,
+                    lease_expires_at TEXT,
                     error_message TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -248,16 +252,25 @@ class KnowledgeStore:
                 );
                 """
             )
+            connection.execute("BEGIN IMMEDIATE")
             for column, definition in (
                 ("max_attempts", "INTEGER NOT NULL DEFAULT 3"),
                 ("payload_json", "TEXT NOT NULL DEFAULT '{}'"),
                 ("result_json", "TEXT"),
                 ("available_at", "TEXT"),
                 ("locked_at", "TEXT"),
+                ("lease_token", "TEXT"),
+                ("lease_expires_at", "TEXT"),
             ):
                 existing = {row[1] for row in connection.execute("PRAGMA table_info(processing_tasks)")}
                 if column not in existing:
                     connection.execute(f"ALTER TABLE processing_tasks ADD COLUMN {column} {definition}")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_processing_tasks_lease ON processing_tasks(status, lease_expires_at)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_evidence_qa_version ON evidence(qa_version_id)"
+            )
             paper_columns = {row[1] for row in connection.execute("PRAGMA table_info(papers)")}
             for column, definition in (("match_method", "TEXT"), ("match_confidence", "REAL"), ("matched_at", "TEXT"), ("reviewed_by", "TEXT")):
                 if column not in paper_columns:
@@ -551,51 +564,103 @@ class KnowledgeStore:
             )
         return task_id
 
-    def claim_task(self, *, stage: str | None = None) -> dict[str, Any] | None:
-        now = datetime.now(timezone.utc).isoformat()
+    def claim_task(
+        self, *, stage: str | None = None, lease_seconds: int = DEFAULT_TASK_LEASE_SECONDS,
+    ) -> dict[str, Any] | None:
+        if lease_seconds < 1:
+            raise ValueError("lease_seconds must be positive")
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            now = datetime.now(timezone.utc)
+            timestamp = now.isoformat()
+            legacy_cutoff = (now - timedelta(seconds=DEFAULT_TASK_LEASE_SECONDS)).isoformat()
+            connection.execute(
+                """
+                UPDATE processing_tasks
+                SET status=CASE WHEN attempts < max_attempts THEN 'queued' ELSE 'dead_letter' END,
+                    available_at=?, updated_at=?, locked_at=NULL, lease_token=NULL, lease_expires_at=NULL,
+                    error_message='worker lease expired'
+                WHERE status='running' AND (
+                    lease_expires_at <= ? OR
+                    (lease_expires_at IS NULL AND COALESCE(locked_at, updated_at) <= ?)
+                )
+                """, (timestamp, timestamp, timestamp, legacy_cutoff),
+            )
             query = "SELECT * FROM processing_tasks WHERE status='queued' AND (available_at IS NULL OR available_at<=?)"
-            params: list[Any] = [now]
+            params: list[Any] = [timestamp]
             if stage:
                 query += " AND stage=?"
                 params.append(stage)
-            query += " ORDER BY created_at, task_id LIMIT 1"
-            row = connection.execute(query, params).fetchone()
+            row = connection.execute(query + " ORDER BY created_at, task_id LIMIT 1", params).fetchone()
             if not row:
                 return None
+            token = uuid4().hex
+            expires = (now + timedelta(seconds=lease_seconds)).isoformat()
             connection.execute(
-                "UPDATE processing_tasks SET status='running', attempts=attempts+1, locked_at=?, updated_at=? WHERE task_id=?",
-                (now, now, row["task_id"]),
+                """
+                UPDATE processing_tasks SET status='running', attempts=attempts+1, locked_at=?,
+                    updated_at=?, lease_token=?, lease_expires_at=? WHERE task_id=?
+                """, (timestamp, timestamp, token, expires, row["task_id"]),
             )
             result = dict(row)
-            result["status"] = "running"
-            result["attempts"] = int(result["attempts"]) + 1
+            result.update(status="running", attempts=result["attempts"] + 1,
+                          lease_token=token, lease_expires_at=expires, locked_at=timestamp)
             result["payload"] = json.loads(result.pop("payload_json"))
             return result
 
-    def finish_task(self, task_id: str, *, result: dict[str, Any] | None = None) -> bool:
+    def renew_task(self, task_id: str, lease_token: str, *, lease_seconds: int = DEFAULT_TASK_LEASE_SECONDS) -> bool:
+        if lease_seconds < 1:
+            raise ValueError("lease_seconds must be positive")
         with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            now = datetime.now(timezone.utc)
             cursor = connection.execute(
-                "UPDATE processing_tasks SET status='succeeded', result_json=?, updated_at=?, locked_at=NULL WHERE task_id=? AND status='running'",
-                (json.dumps(result or {}, ensure_ascii=False), datetime.now(timezone.utc).isoformat(), task_id),
+                """
+                UPDATE processing_tasks SET lease_expires_at=?, updated_at=?
+                WHERE task_id=? AND status='running' AND lease_token=? AND lease_expires_at>?
+                """,
+                ((now + timedelta(seconds=lease_seconds)).isoformat(), now.isoformat(), task_id, lease_token, now.isoformat()),
             )
         return cursor.rowcount > 0
 
-    def fail_task(self, task_id: str, error_message: str, *, retry_delay_seconds: int | None = None) -> bool:
-        now = datetime.now(timezone.utc).isoformat()
+    def finish_task(self, task_id: str, *, lease_token: str, result: dict[str, Any] | None = None) -> bool:
         with self.connect() as connection:
-            row = connection.execute("SELECT attempts, max_attempts FROM processing_tasks WHERE task_id=?", (task_id,)).fetchone()
+            connection.execute("BEGIN IMMEDIATE")
+            now = datetime.now(timezone.utc).isoformat()
+            cursor = connection.execute(
+                """
+                UPDATE processing_tasks SET status='succeeded', result_json=?, updated_at=?, locked_at=NULL,
+                    lease_token=NULL, lease_expires_at=NULL, error_message=NULL
+                WHERE task_id=? AND status='running' AND lease_token=? AND lease_expires_at>?
+                """,
+                (json.dumps(result or {}, ensure_ascii=False), now, task_id, lease_token, now),
+            )
+        return cursor.rowcount > 0
+
+    def fail_task(
+        self, task_id: str, error_message: str, *, lease_token: str, retry_delay_seconds: int | None = None,
+    ) -> bool:
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            now = datetime.now(timezone.utc)
+            row = connection.execute(
+                """
+                SELECT attempts, max_attempts FROM processing_tasks
+                WHERE task_id=? AND status='running' AND lease_token=? AND lease_expires_at>?
+                """, (task_id, lease_token, now.isoformat()),
+            ).fetchone()
             if not row:
                 return False
             status = "queued" if row["attempts"] < row["max_attempts"] else "dead_letter"
             delay = retry_delay_seconds if retry_delay_seconds is not None else min(3600, 60 * (2 ** max(0, int(row["attempts"]) - 1)))
-            available_at = (datetime.now(timezone.utc) + timedelta(seconds=max(0, delay))).isoformat() if status == "queued" else None
-            cursor = connection.execute(
-                "UPDATE processing_tasks SET status=?, error_message=?, available_at=?, updated_at=?, locked_at=NULL WHERE task_id=? AND status='running'",
-                (status, error_message[:2000], available_at, now, task_id),
+            available_at = (now + timedelta(seconds=max(0, delay))).isoformat() if status == "queued" else None
+            connection.execute(
+                """
+                UPDATE processing_tasks SET status=?, error_message=?, available_at=?, updated_at=?,
+                    locked_at=NULL, lease_token=NULL, lease_expires_at=NULL WHERE task_id=?
+                """, (status, error_message[:2000], available_at, now.isoformat(), task_id),
             )
-        return cursor.rowcount > 0
+        return True
 
     def list_tasks(self, *, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         with self.connect() as connection:
@@ -787,6 +852,45 @@ class KnowledgeStore:
                 (hub_paper_id, status, method, confidence, now, reviewed_by, json.dumps(metadata, ensure_ascii=False), now, paper_id),
             )
         return cursor.rowcount > 0
+
+    def qa_matches(self, items: list[dict[str, Any]]) -> list[dict[str, Any] | None]:
+        """Look up exact QA versions and their best eligible evidence in one read."""
+        if not items:
+            return []
+        params = []
+        for index, item in enumerate(items):
+            content = f"{item['question']}\n{item['answer']}"
+            params.extend((index, item["doc_id"], item["pair_id"], hashlib.sha256(content.encode()).hexdigest()))
+        values = ", ".join("(?, ?, ?, ?)" for _ in items)
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                WITH wanted(position, doc_id, pair_id, content_hash) AS (VALUES {values}),
+                matches AS (
+                    SELECT w.position, p.paper_id, q.qa_id, qv.qa_version_id, qv.review_status, qv.knowledge_type,
+                           ROW_NUMBER() OVER (PARTITION BY w.position ORDER BY qv.created_at DESC, qv.qa_version_id) AS rank
+                    FROM wanted w
+                    JOIN papers p ON p.legacy_doc_id = w.doc_id
+                    JOIN qa_families q ON q.paper_id = p.paper_id
+                    JOIN qa_versions qv ON qv.qa_id = q.qa_id AND qv.pair_id = w.pair_id
+                                       AND qv.content_hash = w.content_hash
+                )
+                SELECT m.*, e.evidence_text, e.section_path, e.locator_quality
+                FROM matches m
+                LEFT JOIN evidence e ON e.evidence_id = (
+                    SELECT evidence_id FROM evidence
+                    WHERE qa_version_id = m.qa_version_id AND review_status <> 'rejected'
+                    ORDER BY (locator_quality = 'qa_pair'),
+                             (review_status IN ('reviewed', 'approved', 'verified')) DESC,
+                             (locator_quality = 'section') DESC, alignment_confidence DESC, evidence_id
+                    LIMIT 1
+                )
+                WHERE m.rank = 1
+                """,
+                params,
+            )
+            results = {row["position"]: dict(row) for row in rows}
+        return [results.get(index) for index in range(len(items))]
 
     def qa_details(self, legacy_doc_id: str, pair_id: int) -> dict[str, Any] | None:
         with self.connect() as connection:

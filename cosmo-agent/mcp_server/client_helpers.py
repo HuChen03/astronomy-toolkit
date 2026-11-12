@@ -63,7 +63,9 @@ async def mcp_session(env_manifest, transport='stdio', port=8777, state=None):
         proc = subprocess.Popen([sys.executable, *args, '--transport', 'streamable-http', '--port', str(port)],
                                 stdout=log, stderr=log, start_new_session=True)
         try:
-            async with httpx.AsyncClient(trust_env=False, timeout=120) as http_client:
+            token = os.environ.get("COSMO_EXEC_HTTP_TOKEN")
+            headers = {"Authorization": f"Bearer {token}"} if token else None
+            async with httpx.AsyncClient(trust_env=False, timeout=120, headers=headers) as http_client:
                 # Server startup can take tens of seconds on a loaded compute node.
                 for _ in range(600):
                     if proc.poll() is not None:

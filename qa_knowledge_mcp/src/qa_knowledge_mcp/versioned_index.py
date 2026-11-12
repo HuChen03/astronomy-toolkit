@@ -1,24 +1,17 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any
 
 from lab_knowledge_platform.knowledge_store import KnowledgeStore
 from lab_knowledge_platform.paths import INDEX_ROOT, KNOWLEDGE_OVERLAY_DB, PROJECT_ROOT
 
 from .build_kb import build
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+from .knowledge_base import DEFAULT_EMBEDDING_MODEL, sha256_file
 
 
 def active_index(index_root: Path = INDEX_ROOT) -> Path | None:
@@ -44,7 +37,7 @@ def build_versioned_index(
     source = source if source.is_absolute() else PROJECT_ROOT / source
     index_root = index_root if index_root.is_absolute() else PROJECT_ROOT / index_root
     source_hash = sha256_file(source)
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     index_version = f"{timestamp}-{source_hash[:12]}"
     version_dir = index_root / "versions" / index_version
     version_dir.mkdir(parents=True, exist_ok=False)
@@ -52,12 +45,14 @@ def build_versioned_index(
         source,
         version_dir,
         embedding=embedding,
-        model_name=model_name or os.environ.get("QA_EMBEDDING_MODEL", ""),
+        model_name=model_name or os.environ.get("QA_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
         device=device,
         batch_size=batch_size,
     )
     manifest_path = version_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest["source_hash"] != source_hash:
+        raise RuntimeError(f"knowledge source changed before indexing: {source}")
     manifest.update({
         "schema_version": 2,
         "index_version": index_version,
@@ -83,11 +78,15 @@ def build_versioned_index(
         raise RuntimeError(f"index validation failed for {index_version}")
     index_root.mkdir(parents=True, exist_ok=True)
     pointer = index_root / "active.json"
-    temporary = pointer.with_suffix(".tmp")
-    temporary.write_text(json.dumps({"index_version": index_version}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    temporary.replace(pointer)
     if overlay_db.exists():
         KnowledgeStore(overlay_db).register_index(index_version, source_hash, manifest)
+    with NamedTemporaryFile(mode="w", encoding="utf-8", dir=index_root, delete=False) as handle:
+        temporary = Path(handle.name)
+        json.dump({"index_version": index_version}, handle)
+    try:
+        temporary.replace(pointer)
+    finally:
+        temporary.unlink(missing_ok=True)
     return {"index_version": index_version, "path": str(version_dir), "manifest": manifest, "validation": validation}
 
 

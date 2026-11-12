@@ -34,7 +34,8 @@ exec:
   builtin_deny_patterns: true     # 内置拒绝表（rm -rf /、mkfs、dd of=/dev/…、sudo、curl|sh 等）；唯一能关掉它的开关
   disabled_deny_patterns: []      # 只关掉某几条内置规则（名字见 env_info.exec_policy.deny_patterns 与服务端报错信息）
   deny_patterns: []               # 在内置表之上【追加】站点自定义正则；空列表不会关闭内置表
-  allow_commands: []              # 非空 = 白名单模式：只允许这些可执行名（argv[0] basename），并自动禁止 shell=true
+  allow_commands: []              # 非空时绑定绝对路径。纯命令名由服务端 PATH 解析。
+  allow_env: []                   # 白名单模式下可额外允许的作业环境变量名。
 
 slurm:
   available: false

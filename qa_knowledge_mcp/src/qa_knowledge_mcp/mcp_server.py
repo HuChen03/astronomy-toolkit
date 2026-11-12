@@ -64,24 +64,24 @@ def main() -> None:
     parser.add_argument(
         "--source",
         type=Path,
-        default=Path(
-            os.environ.get(
-                "QA_SOURCE",
-                COSMOLOGICAL_DATA_ROOT / "generate_paper.jsonl",
-            )
-        ),
+        default=os.environ.get("QA_SOURCE"),
     )
     parser.add_argument(
         "--index",
         type=Path,
-        default=(Path(os.environ["QA_INDEX"]) if os.environ.get("QA_INDEX") else (active_index(INDEX_ROOT) or COSMOLOGICAL_DATA_ROOT / "index")),
+        default=os.environ.get("QA_INDEX"),
     )
     parser.add_argument("--knowledge-base-config", type=Path, default=Path(os.environ.get("QA_KNOWLEDGE_BASE_CONFIG", PROJECT_ROOT / "config/knowledge_bases")))
     parser.add_argument("--transport", choices=("stdio", "streamable-http"), default=os.environ.get("QA_MCP_TRANSPORT", "stdio"))
     parser.add_argument("--host", default=os.environ.get("QA_MCP_HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("QA_MCP_PORT", "8001")))
     args = parser.parse_args()
-    server = create_server(args.source, args.index, catalog_path=args.knowledge_base_config, host=args.host, port=args.port)
+    default_source = COSMOLOGICAL_DATA_ROOT / "generate_paper.jsonl"
+    source = args.source or default_source
+    index = args.index
+    if index is None and source.resolve() == default_source.resolve():
+        index = active_index(INDEX_ROOT) or COSMOLOGICAL_DATA_ROOT / "index"
+    server = create_server(source, index, catalog_path=args.knowledge_base_config, host=args.host, port=args.port)
     server.run(transport=args.transport)
 
 

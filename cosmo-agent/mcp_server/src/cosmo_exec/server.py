@@ -15,6 +15,8 @@ the check on a trusted network (see docs/install_and_client.md §2.3).
 from __future__ import annotations
 
 import argparse
+import hmac
+import ipaddress
 import os
 import platform
 import shutil
@@ -24,9 +26,12 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from .config import load_config
 from .ledger import Ledger
+from .policy import HTTP_TOKEN_VAR
 from .processes import ProcessManager
 
 MAX_READ_BYTES = 256 * 1024
@@ -36,6 +41,29 @@ MAX_LIST_ENTRIES = 1000
 # Mirrors the defaults FastMCP installs for a loopback bind host.
 LOOPBACK_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
 LOOPBACK_ORIGINS = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
+
+
+def _loopback(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host.lower() == "localhost"
+
+
+def _with_http_token(app, token: str):
+    expected = f"Bearer {token}".encode()
+
+    async def authenticated(scope, receive, send):
+        if scope["type"] == "http":
+            actual = Request(scope).headers.get("authorization", "").encode()
+            if not hmac.compare_digest(expected, actual):
+                response = JSONResponse({"error": "unauthorized"}, status_code=401,
+                                        headers={"WWW-Authenticate": "Bearer"})
+                await response(scope, receive, send)
+                return
+        await app(scope, receive, send)
+
+    return authenticated
 
 
 def _expand_host(entry: str) -> list[str]:
@@ -100,6 +128,8 @@ def build_server(config, transport_security: TransportSecuritySettings | None = 
         offset is a byte offset (use next_offset from a previous call to page).
         """
         p = config.check_path(path)
+        if ledger.is_private(p):
+            raise PermissionError("run metadata and audit logs are available to the operator only")
         if not p.is_file():
             raise FileNotFoundError(f"not a file: {p}")
         max_bytes = max(1, min(max_bytes, MAX_READ_BYTES))
@@ -228,7 +258,7 @@ def build_server(config, transport_security: TransportSecuritySettings | None = 
 
     @mcp.tool()
     def exec_stop(run_id: str, sig: int = int(signal.SIGTERM)) -> dict:
-        """Send a signal (default SIGTERM) to a background process group."""
+        """Send SIGTERM, SIGINT or SIGKILL to a background group and report whether it exited."""
         return procs.stop(run_id, sig)
 
     # ---------- ledger ----------
@@ -236,7 +266,7 @@ def build_server(config, transport_security: TransportSecuritySettings | None = 
     @mcp.tool()
     def run_list(limit: int = 20) -> dict:
         """List recent execution records (newest first), including past server sessions."""
-        return {"runs": ledger.list_runs(min(limit, 200))}
+        return {"runs": procs.list_runs(limit)}
 
     @mcp.tool()
     def run_get(run_id: str) -> dict:
@@ -327,8 +357,8 @@ def main() -> None:
                         help="drop the whole built-in deny table (only for a server whose "
                              "callers are fully trusted)")
     parser.add_argument("--allow-command", action="append", default=None, metavar="NAME",
-                        help="repeatable; if given, only these executable names (argv[0] "
-                             "basename) may run and shell=true is refused")
+                        help="repeatable; bind each command to an approved absolute path "
+                             "or resolve a name using the server PATH; shell=true is refused")
     parser.add_argument("--no-shell", action="store_true",
                         help="refuse exec_run/exec_start with shell=true")
     parser.add_argument("--protected-path", action="append", default=None, metavar="PATH",
@@ -337,6 +367,10 @@ def main() -> None:
                         help="disable the Host/Origin check on HTTP transports; only for "
                              "servers reachable from a trusted network")
     args = parser.parse_args()
+
+    http_token = os.environ.get(HTTP_TOKEN_VAR, "")
+    if args.transport != "stdio" and not _loopback(args.host) and not http_token:
+        parser.error(f"non-loopback HTTP requires {HTTP_TOKEN_VAR}")
 
     allowed_hosts = list(args.allowed_host or [])
     allowed_hosts += [h.strip() for h in os.environ.get("COSMO_EXEC_ALLOWED_HOSTS", "").split(",") if h.strip()]
@@ -359,10 +393,19 @@ def main() -> None:
             print("note: --allowed-host/--no-dns-rebinding-protection have no effect on stdio",
                   file=sys.stderr)
     mcp = build_server(config, transport_security=security)
-    if args.transport != "stdio":
+    if args.transport == "stdio":
+        mcp.run(transport="stdio")
+    else:
         mcp.settings.host = args.host
         mcp.settings.port = args.port
-    mcp.run(transport=args.transport)
+        if http_token:
+            import uvicorn
+
+            app = mcp.sse_app() if args.transport == "sse" else mcp.streamable_http_app()
+            uvicorn.run(_with_http_token(app, http_token), host=args.host, port=args.port,
+                        log_level=mcp.settings.log_level.lower())
+        else:
+            mcp.run(transport=args.transport)
 
 
 if __name__ == "__main__":
