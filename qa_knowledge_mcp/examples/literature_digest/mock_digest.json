@@ -1,0 +1,28 @@
+{
+  "date": "2026-05-06",
+  "summary": "Mock daily digest for local tests.",
+  "stats": {
+    "total_candidates": 3,
+    "selected": 3
+  },
+  "items": [
+    {
+      "paper_id": "paper-low",
+      "title": "Generic materials discovery",
+      "summary": "A broad study about materials discovery.",
+      "score": 99.0
+    },
+    {
+      "paper_id": "paper-zinc",
+      "title": "Stable zinc anode for aqueous zinc-ion battery",
+      "summary": "The work suppresses zinc dendrite growth by electrolyte engineering.",
+      "score": 0.1
+    },
+    {
+      "paper_id": "paper-kagome",
+      "title": "Charge density wave in a kagome superconductor",
+      "summary": "We report signatures of unconventional superconductivity.",
+      "score": 2.0
+    }
+  ]
+}

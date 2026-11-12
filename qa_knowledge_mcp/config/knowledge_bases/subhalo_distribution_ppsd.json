@@ -1,0 +1,8 @@
+{
+  "id": "subhalo_distribution_ppsd",
+  "name": "子晕质量与空间分布及宿主晕相空间密度",
+  "description": "暗物质子晕（subhalo）质量函数与空间分布、以及宿主晕 pseudo-phase-space density（PPSD）方向的小型知识库：覆盖子晕质量函数普适性、径向分布与速度/空间偏袒、统一子晕模型（Han et al. 2016）及其 WDM 扩展（He et al. 2023）、潮汐剥离与人工瓦解的数值收敛、subhalo finder 可靠性，以及 Taylor & Navarro 2001、Ludlow et al. 2010、Navarro et al. 2010 以来的 PPSD 幂律性与非普适性研究（含 Symphony 套件 2026 种子论文）。经典文献含 Gao et al. 2004、Aquarius（Springel et al. 2008）、Giocoli et al. 2008、Diemand et al. 2004 等。",
+  "source": "data/knowledge_bases/subhalo_distribution_ppsd/source.jsonl",
+  "index": "data/knowledge_bases/subhalo_distribution_ppsd/index",
+  "enabled": true
+}

@@ -1,0 +1,8 @@
+diff --git a/HBT.cpp b/HBT.cpp
+index d899c76..121cbf8 100644
+--- a/HBT.cpp
++++ b/HBT.cpp
+@@ -18,0 +19 @@
++ { // Release HDF5/MPI-owning objects before MPI_Finalize tears down MPI-IO.
+@@ -106,0 +108 @@
++ }

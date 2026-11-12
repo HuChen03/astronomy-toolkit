@@ -1,0 +1,30 @@
+# Paths relative to project_root exposed by env_info.
+#
+# `queries` 只是该软件的常见检索入口，**不是可查内容的边界**：列表里没有的参数
+# 直接对 source/ 跑 `rg`。`version` 说明 upstream 目录对应哪份代码/文档——因为
+# GADGET 用的是 GrGadget fork，fork 特有行为以上游文档为准可能出错，需另查源码与
+# 项目根 modifications.md。
+gadget4:
+  upstream: sources/Gadget4/documentation
+  local: skills/gadget4/references
+  source: sources/Gadget4/src
+  version: "GrGadget fork, branch master @ d0e3eeec250b2265ee76a5c8fe13ca9003d5f14d（非上游 gadget4 官方 tag）"
+  fork_notes: modifications.md
+  queries: [ICFormat, OutputListFilename, FOF, RestartFlag, LEAN, MaxMemSize, TimeLimitCPU]
+arepo:
+  upstream: sources/arepo/documentation
+  local: skills/arepo/references
+  source: sources/arepo/src
+  version: "公开版（github.com/dnelson86/arepo 镜像 @ d924fb3；开发版需申请）"
+  queries: [OutputListOn, SnapFormat, TimeMax, restart]
+twolptic:
+  local: skills/twolptic/references
+  source: sources/2lptic
+  version: "2LPTic.tar.gz，无 git 仓库；md5 538127510b8700637636ba3c8f577c0c"
+  queries: [Nsample, Nmesh, WhichSpectrum, GlassTileFac, NO64BITID, NumFilesWrittenInParallel]
+hbtplus:
+  local: skills/hbtplus/references
+  source: sources/HBTplus-g4/src
+  reader: sources/HBTplus-g4/toolbox/HBTReader.py
+  version: "MPI-Hydro-G4 分支 @ eada82e（tag v1.18.1.MPI-G4，原生读 Gadget-4 快照）"
+  queries: [gadget4_hdf, SnapshotIndexOfSink, SinkTrackId, TrackId, SrcSnap]

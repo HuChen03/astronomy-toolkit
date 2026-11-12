@@ -1,0 +1,97 @@
+# 来源：sources/Gadget4/examples/DM-L50-N128/param.txt（GrGadget/Gadget4 @ d0e3eee）
+# 纯暗物质宇宙学盒子，50 Mpc/h，128^3 粒子，z=63→z=0；启动时在线生成 IC（需 Config.sh 开 NGENIC+CREATE_GRID）
+# 用法：mpirun -np N ./Gadget4 param.txt   （本文件在服务端运行目录内，相对路径相对该目录）
+
+%----  Relevant files
+InitCondFile         ./dummy.dat       % CREATE_GRID 模式启动时在线生成 IC，此文件不读取
+OutputDir            ./output
+SnapshotFileBase     snapshot
+OutputListFilename   outputs.txt       % 输出时刻列表（尺度因子 a），每行一个
+
+%---- File formats
+ICFormat             1
+SnapFormat           3                 % 3 = HDF5（推荐）
+
+%---- CPU-time limits
+TimeLimitCPU              86400        % 秒；跑到 85% 自动写 restart 退出
+CpuTimeBetRestartFile     7200         % 秒
+
+%----- Memory allocation
+MaxMemSize                1800         % 每 MPI rank 的内存上限（MB）
+
+%---- Characteristics of run
+TimeBegin                 0.015625     % 起始尺度因子 a（z=63）
+TimeMax                   1.0          % 终止 a（z=0）
+
+%---- Basic code options that set the type of simulation
+ComovingIntegrationOn     1            % 共动宇宙学积分
+
+%---- Cosmological parameters
+Omega0                    0.308
+OmegaLambda               0.692
+OmegaBaryon               0.0482
+HubbleParam               0.678        % 小 h
+Hubble                    100.0        % H0 内部单位 (km/s)/(Mpc/h)
+BoxSize                   50.0         % Mpc/h（共动）
+
+%---- Output frequency（二选一：OutputListOn=1 从 outputs.txt 读时刻；
+%---- 或 OutputListOn=0，此时共动模式 TimeBetSnapshot 是 a 的乘性因子（必须>1），
+%---- 且 TimeOfFirstSnapshot 必须 >0（否则 find_next_outputtime 死循环报错）
+OutputListOn              1
+TimeBetSnapshot           0.0
+TimeOfFirstSnapshot       0.0
+TimeBetStatistics         0.01         % ln(a) 间隔写 energy.txt 等
+NumFilesPerSnapshot       1
+MaxFilesWithConcurrentIO  1
+
+%---- Accuracy of time integration
+ErrTolIntAccuracy        0.01
+CourantFac               0.3
+MaxSizeTimestep          0.005         % Δln(a) 上限
+MinSizeTimestep          0.0
+
+%---- Tree algorithm, force accuracy
+TypeOfOpeningCriterion                1
+ErrTolTheta                           0.75
+ErrTolThetaMax                        1.0
+ErrTolForceAcc                        0.002
+TopNodeFactor                         3.0
+ActivePartFracForNewDomainDecomp      0.01
+ActivePartFracForPMinsteadOfEwald     0.05
+
+%---- Initial density estimate（SPH 邻居数，纯 DM 也必须给出）
+DesNumNgb                        64
+MaxNumNgbDeviation               1
+
+%---- System of units
+UnitLength_in_cm         3.085678e24   % 1 Mpc/h，单位 cm
+UnitMass_in_g            1.989e43      % 1e10 Msun/h，单位 g
+UnitVelocity_in_cm_per_s 1e5           % 1 km/s
+GravityConstantInternal  0             % 0 = 由单位制自动推导
+
+%---- Gravitational softening（共动/物理上限，单位同 UnitLength）
+SofteningComovingClass0      0.01      % 10 kpc/h
+SofteningMaxPhysClass0       0.01
+SofteningClassOfPartType0    0
+SofteningClassOfPartType1    0
+
+%----- SPH（纯 DM 算例占位）
+ArtBulkViscConst             1.0
+MinEgySpec                   0
+InitGasTemp                  0
+
+%----- fork 新增参数（GrGadget 特有，官方文档未记录）
+SamplingCorrection          0        % gevolution PM 的采样校正，0=关（PARAM_FIXED 必填）
+
+%----- N-GenIC（内建 IC 生成；PowerSpectrumType 0 = Efstathiou 解析谱，无需外部功率谱文件）
+NSample                     128        % 粒子数 = NSample^3
+GridSize                    128        % IC 生成网格
+Seed                        181170
+SphereMode                  1
+PowerSpectrumType           0
+ReNormalizeInputSpectrum    1
+PrimordialIndex             1.0
+ShapeGamma                  0.21
+Sigma8                      0.9
+PowerSpectrumFile           powerspec  % Type 0 时不读取
+InputSpectrum_UnitLength_in_cm 3.085678e21

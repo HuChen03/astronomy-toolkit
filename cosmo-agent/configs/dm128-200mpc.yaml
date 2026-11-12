@@ -1,0 +1,40 @@
+# Reproducible project baseline, not a precision cosmology calibration.
+name: dm128-200mpc
+particles_per_dimension: 128
+box:
+  length: 200.0
+  unit: comoving_Mpc
+cosmology:
+  omega_m: 0.308
+  omega_lambda: 0.692
+  omega_b: 0.0482
+  h: 0.678
+  sigma8: 0.815
+  ns: 1.0
+initial_conditions:
+  generator: 2LPTIC
+  spectrum: eisenstein_hu
+  redshift: 49.0
+  seed: 42
+  mesh: 256
+  files: 2
+outputs:
+  count: 50
+  spacing: log_a
+  first_redshift: 19.0
+  final_redshift: 0.0
+  include_initial_conditions: false
+gravity:
+  max_step_dln_a: 0.005
+  pmgrid: 256
+  softening_fraction_of_spacing: 0.025
+  max_physical_softening_fraction: 0.025
+  fof_linking_fraction: 0.2
+execution:
+  mpi_ranks: 8
+  hbt_mpi_ranks: 2
+  omp_threads: 1
+  memory_mb_per_rank: 1800
+  # 每次执行的墙钟预算（GADGET-4 在 85% 处停下写 restart）。本盒子单次跑不完，
+  # e2e_pipeline.py 会自动带 restart 标志续跑直到 TimeMax，故总时长可能是它的数倍。
+  time_limit_seconds: 72000

@@ -1,0 +1,24 @@
+{
+  "date": "2026-07-07",
+  "summary": "Single-paper mock digest used when the literature hub is unavailable.",
+  "stats": {
+    "total_candidates": 1,
+    "selected": 1
+  },
+  "items": [
+    {
+      "paper_id": "mock-zinc-20260707-001",
+      "title": "Electrolyte Interphase Engineering for Stable Zinc Anodes in Aqueous Zinc-Ion Batteries",
+      "authors": [
+        "Mock Author",
+        "Example Researcher"
+      ],
+      "summary": "This paper studies aqueous zinc-ion battery anodes and reports an electrolyte additive that suppresses zinc dendrite growth, improves Coulombic efficiency, and stabilizes the zinc metal interface during long cycling.",
+      "abstract": "Aqueous zinc-ion batteries are promising for safe and low-cost energy storage, but zinc dendrite formation and interfacial side reactions limit cycle life. We propose an electrolyte interphase engineering strategy that regulates zinc deposition and improves anode reversibility.",
+      "score": 0.72,
+      "venue": "arXiv",
+      "published_at": "2026-07-07",
+      "arxiv_id": "2607.00001"
+    }
+  ]
+}

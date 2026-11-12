@@ -1,0 +1,74 @@
+# 示例环境清单。相对路径以 cosmo-agent/ 为工作目录。
+# 服务端通过 --env 或 COSMO_ENV_MANIFEST 加载；paths.allowed_roots 是服务端强制边界。
+# 修改后重启 MCP server 生效。所有路径均为【服务端】路径，客户端不得假设与本地一致。
+name: local-example
+
+documentation:
+  project_root: .
+  index: docs/documentation-index.yaml
+  search: rg
+
+paths:
+  state_dir: runs
+  allowed_roots:
+    - .
+  # file_write 拒绝写入这些路径（服务端强制），防止客户端改写服务端自身的边界与审计。
+  # 服务端代码（cosmo_exec 包）、本清单文件与 <state_dir>/audit.jsonl 已被自动保护，无需重复列出。
+  # 构建/编译产物走 runs/；若某工作流确需在树内改文件，由操作者执行或临时移除此项。
+  protected:
+    - .git
+    # 环境清单（allowed_roots 与 exec 策略的来源）
+    - environments
+    # MCP 服务代码与 mock Slurm 后端
+    - mcp_server
+    # 四个软件的第三方源码树
+    - sources
+  data_dir: data
+  sources_dir: sources
+
+exec:
+  # exec_run/exec_start 的服务端命令策略（实现见 mcp_server/src/cosmo_exec/policy.py）。
+  # 仅约束「跑什么命令」，与 allowed_roots 约束「在哪里跑」互补；不是沙箱，
+  # 真正的隔离靠低权限用户/容器（解释器可以在运行时拼出同样的字符串）。
+  allow_shell: true               # false = 完全禁止 shell=true，客户端只能传 argv 数组
+  builtin_deny_patterns: true     # 内置拒绝表（rm -rf /、mkfs、dd of=/dev/…、sudo、curl|sh 等）；唯一能关掉它的开关
+  disabled_deny_patterns: []      # 只关掉某几条内置规则（名字见 env_info.exec_policy.deny_patterns 与服务端报错信息）
+  deny_patterns: []               # 在内置表之上【追加】站点自定义正则；空列表不会关闭内置表
+  allow_commands: []              # 非空 = 白名单模式：只允许这些可执行名（argv[0] basename），并自动禁止 shell=true
+
+slurm:
+  available: false
+  partitions: []          # e.g. [{name: cpu, max_walltime: "7-00:00:00", max_nodes: 64}]
+  mock_backend: mcp_server/mock_slurm/bin
+  note: 无真实 Slurm。mock_backend 提供 sbatch/squeue/sacct/scancel 模拟（本地立即后台执行），
+        仅用于测试 Agent 的提交流程，不代表真实集群行为。
+
+mpi:
+  launcher: mpirun
+
+software:
+  gadget4:
+    source: sources/Gadget4
+    repo: https://github.com/GrGadget/Gadget4
+    branch: master
+    commit: d0e3eeec250b2265ee76a5c8fe13ca9003d5f14d
+    binaries:
+      minimal: runs/gadget4/dml50-min/build/Gadget4
+      fof_dm128: sources/Gadget4/build-cosmo-dm128/Gadget4
+    build_note: 依赖 subprojects/LATfield2、subprojects/gevolution-1.2（GrGadget 组织 fork 的 master 分支）
+  hbtplus:
+    source: sources/HBTplus
+    repo: https://github.com/Kambrian/HBTplus
+    branch: MPI-Hydro-G4 (v1.18.1.MPI-G4)
+    worktree: sources/HBTplus-g4
+    binary: sources/HBTplus-g4/HBTi8
+    snapshot_format: gadget4_hdf       # 原生直读 GADGET-4 HDF5 快照与 fof_tab_*.hdf5 目录，无需格式转换
+  twolptic:
+    source: sources/2lptic
+    upstream: http://cosmo.nyu.edu/roman/2LPT/
+    binary: sources/2lptic/2LPTic
+  arepo:
+    source: sources/arepo
+    repo: https://gitlab.mpcdf.mpg.de/vrs/arepo  # 公开版 GPLv3；镜像 github.com/dnelson86/arepo @ d924fb3
+    binary: runs/arepo/isogal/Arepo
+    note: 开发版需申请；公开版可直接克隆

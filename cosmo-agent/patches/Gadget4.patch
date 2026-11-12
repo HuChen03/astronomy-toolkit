@@ -1,0 +1,285 @@
+diff --git a/documentation/04_config-options.md b/documentation/04_config-options.md
+index 6c32534..4260785 100644
+--- a/documentation/04_config-options.md
++++ b/documentation/04_config-options.md
+@@ -782,6 +782,25 @@ scenarios.
+ 
+ -------
+ 
++**IDS_32BIT**
++
++Selects 32-bit integers for the internal storage of particle IDs.
++This is the default if none of the `IDS_XXBIT` options is selected.
++
++-------
++
++**IDS_48BIT**
++
++Selects 48-bit integers for the internal storage of particle IDs.
++
++-------
++
++**IDS_64BIT**
++
++Selects 64-bit integers for the internal storage of particle IDs.
++
++-------
++
+ **DOUBLEPRECISION** = 1
+ 
+ This makes the code store all internal particle data in double
+diff --git a/gadget/meson.build b/gadget/meson.build
+index 44161c4..6c2fc09 100644
+--- a/gadget/meson.build
++++ b/gadget/meson.build
+@@ -3,7 +3,7 @@ subdir('src')
+ gadget_lib=static_library('gadget',gadget_src+gadget_headers,
+     config_header[0],
+     include_directories: gadget_inc,
+-    dependencies: [vectorclass,half],
++    dependencies: [vectorclass,half,mpi,hdf5,gsl,fftw3,latfield,gevolution,healpix,boost],
+     install : true)
+ 
+ install_headers(gadget_headers,subdir: 'gagdet')
+diff --git a/gadget/src/pm_periodic.cc b/gadget/src/pm_periodic.cc
+index 3452332..3fde9ea 100644
+--- a/gadget/src/pm_periodic.cc
++++ b/gadget/src/pm_periodic.cc
+@@ -1828,8 +1828,8 @@ void pm_periodic::pmforce_periodic(int mode, int *typelist, double a)
+ #endif  // FFT_COLUMN_BASED
+ 
+   // write GravPM to particles
+-  for(int i = 0; i < GravPM.size(); ++i)
+-    Sp->set_acceleration(i, GravPM[i]);
++  for(int i = 0; i < (int)GravPM.size(); ++i)
++    Sp->set_acceleration(i, std::array<MyFloat, 3>{(MyFloat)GravPM[i][0], (MyFloat)GravPM[i][1], (MyFloat)GravPM[i][2]});
+   
+   // update the velocities
+   const double inv_a = 1.0/a;
+diff --git a/gadget/src/std_vector.cc b/gadget/src/std_vector.cc
+index c8aba8d..a075fe4 100644
+--- a/gadget/src/std_vector.cc
++++ b/gadget/src/std_vector.cc
+@@ -1,4 +1,5 @@
+ #include <vector>
++#include <cstddef>
+ 
+ template class std::vector<int>;
+ template class std::vector<float>;
+diff --git a/meson.build b/meson.build
+index 42c787e..75eeb59 100644
+--- a/meson.build
++++ b/meson.build
+@@ -16,6 +16,7 @@ bash = find_program('bash')
+ 
+ mpi = dependency('mpi',language: 'cpp')
+ fftw3 = dependency('fftw3')
++fftw3f = dependency('fftw3f')   # 单精度 FFTW（未设 DOUBLEPRECISION_FFTW 时使用）
+ hdf5 = dependency('hdf5',language: 'cpp')
+ gsl = dependency('gsl')
+ hwloc = dependency('hwloc', required: false)
+@@ -51,7 +52,7 @@ subdir('gadget')
+ gadget_exec = executable('Gadget4',
+     sources,headers,config_header,compile_header,git_version,
+     dependencies:
+-    [fftw3,mpi,hwloc,hdf5,gsl,md5,vectorclass,gadget,half,healpix,boost,
++    [fftw3,fftw3f,mpi,hwloc,hdf5,gsl,md5,vectorclass,gadget,half,healpix,boost,
+     latfield,gevolution],
+     install: true)
+ 
+diff --git a/src/data/simparticles.h b/src/data/simparticles.h
+index 9914a26..fe9fbd5 100644
+--- a/src/data/simparticles.h
++++ b/src/data/simparticles.h
+@@ -401,9 +401,13 @@ class simparticles_handler : public particle_handler
+   void set_acceleration(int i, std::array<MyFloat, 3> A) const override
+   {
+     //int i             = Sp.get_active_index(idx);
++#if defined(PMGRID) && defined(PERIODIC) && !defined(TREEPM_NOTIMESPLIT)
+     Sp.P[i].GravPM[0] = A[0];
+     Sp.P[i].GravPM[1] = A[1];
+     Sp.P[i].GravPM[2] = A[2]; // in gadget units
++#else
++    (void)i; (void)A;
++#endif
+   }
+   // TODO: velocity here
+   // void set_velocity(int i, std::array<MyFloat, 3> V) const override
+diff --git a/src/domain/domain_box.cc b/src/domain/domain_box.cc
+index dda8743..0e1ef97 100644
+--- a/src/domain/domain_box.cc
++++ b/src/domain/domain_box.cc
+@@ -14,6 +14,7 @@
+ #include "../data/lcparticles.h"   // lcparticles
+ #include "../data/simparticles.h"  // simparticles
+ #include "../domain/domain.h"
++#include "../system/system.h"  // get_random_number
+ #include "gadget/dtypes.h"  // MyIntPosType
+ 
+ namespace gadget{
+diff --git a/src/fof/fof.cc b/src/fof/fof.cc
+index 880b3cd..c080198 100644
+--- a/src/fof/fof.cc
++++ b/src/fof/fof.cc
+@@ -39,6 +39,8 @@
+ #include "gadget/peano.h"
+ #include "gadget/timebindata.h"
+ 
++namespace gadget{
++
+ /*! Computation of a FOF group catalogue.
+  *
+  * \param num
+@@ -975,7 +977,7 @@ void fof<partset>::fof_compute_group_properties(int gr, int start, int len)
+       for(int j = 0; j < 3; j++)
+         {
+           Group[gr].CM[j] += Tp->P[index].getMass() * xyz[j];
+-          Group[gr].Vel[j] += Tp->P[index].getMass() * Tp->P[index].Vel[j];
++          Group[gr].Vel[j] += Tp->P[index].getMass() * Tp->P[index].Momentum[j];  /* fork: Vel 更名为 Momentum（牛顿情形下即物理坐标peculiar速度） */
+         }
+     }
+ }
+@@ -1186,9 +1188,13 @@ void fof<lcparticles>::fof_get_halo_position(MyIntPosType *intpos, double *pos)
+ }
+ #endif
+ 
++} // namespace gadget
++
+ /* now make sure that the following classes are really instantiated, otherwise we may get a linking problem */
+ #include "../data/simparticles.h"
++namespace gadget{
+ template class fof<simparticles>;
++} // namespace gadget
+ 
+ #if defined(LIGHTCONE) && defined(LIGHTCONE_PARTICLES_GROUPS)
+ #include "../data/lcparticles.h"
+diff --git a/src/fof/fof.h b/src/fof/fof.h
+index a089ef3..f91a20b 100644
+--- a/src/fof/fof.h
++++ b/src/fof/fof.h
+@@ -21,6 +21,8 @@
+ #include "../fof/foftree.h"
+ #include "../gravtree/gravtree.h"
+ 
++namespace gadget{
++
+ /*! \brief FOF routines
+  *
+  * The template type 'partset' will be given either by 'simparticles' (normal particle set) or by 'lightconeparticles' (for group
+@@ -677,6 +679,8 @@ inline bool is_type_secondary_link_type(int type)
+   else
+     return false;
+ }
++} // namespace gadget
++
+ #endif  // end of FOF
+ 
+ #endif
+diff --git a/src/fof/fof_findgroups.cc b/src/fof/fof_findgroups.cc
+index c93eb9a..3bb8c0a 100644
+--- a/src/fof/fof_findgroups.cc
++++ b/src/fof/fof_findgroups.cc
+@@ -32,6 +32,8 @@
+ #include "gadget/intposconvert.h"
+ #include "gadget/mpi_utils.h"
+ 
++namespace gadget{
++
+ /* local data structure for collecting particle/cell data that is sent to other processors if needed */
+ struct foffind_in : data_in_generic
+ {
+@@ -737,9 +739,13 @@ int foftree<partset>::treefind_fof_check_single_node_for_full_linking(int no)
+   return 0;
+ }
+ 
++} // namespace gadget
++
+ /* now make sure that the following classes are really instantiated, otherwise we may get a linking problem */
+ #include "../data/simparticles.h"
++namespace gadget{
+ template class fof<simparticles>;
++} // namespace gadget
+ 
+ #if defined(LIGHTCONE) && defined(LIGHTCONE_PARTICLES_GROUPS)
+ #include "../data/lcparticles.h"
+diff --git a/src/fof/fof_io.cc b/src/fof/fof_io.cc
+index e2d7b9e..57b3b7c 100644
+--- a/src/fof/fof_io.cc
++++ b/src/fof/fof_io.cc
+@@ -38,6 +38,8 @@
+ #include "gadget/mpi_utils.h"
+ #include "version.h"
+ 
++namespace gadget{
++
+ /*! \file fof_io.c
+  *  \brief parallel I/O routines for the FOF and SUBFIND group finders
+  */
+@@ -585,9 +587,13 @@ void fof_io<partset>::fof_subfind_prepare_ID_list(void)
+   mpi_printf("FOF/SUBFIND: Particle/cell IDs in groups globally sorted. took = %g sec\n", Logs.timediff(t0, t1));
+ }
+ 
++} // namespace gadget
++
+ /* now make sure that the following classes are really instantiated, otherwise we may get a linking problem */
+ #include "../data/simparticles.h"
++namespace gadget{
+ template class fof_io<simparticles>;
++} // namespace gadget
+ 
+ #if defined(LIGHTCONE) && defined(LIGHTCONE_PARTICLES_GROUPS)
+ #include "../data/lcparticles.h"
+diff --git a/src/fof/fof_io.h b/src/fof/fof_io.h
+index 4d4c926..bd51762 100644
+--- a/src/fof/fof_io.h
++++ b/src/fof/fof_io.h
+@@ -15,6 +15,8 @@
+ #include "../fof/fof.h"
+ #include "../io/io.h"
+ 
++namespace gadget{
++
+ template <typename partset>
+ class fof_io : public IO_Def
+ {
+@@ -100,4 +102,7 @@ class fof_io : public IO_Def
+   }
+ };
+ 
++
++} // namespace gadget
++
+ #endif
+diff --git a/src/fof/fof_nearest.cc b/src/fof/fof_nearest.cc
+index ae93977..606441c 100644
+--- a/src/fof/fof_nearest.cc
++++ b/src/fof/fof_nearest.cc
+@@ -31,6 +31,8 @@
+ #include "gadget/dtypes.h"
+ #include "gadget/intposconvert.h"
+ 
++namespace gadget{
++
+ /* local data structure for collecting particle/cell data that is sent to other processors if needed */
+ 
+ struct fofdata_in : data_in_generic
+@@ -362,4 +364,6 @@ template class fof<simparticles>;
+ template class fof<lcparticles>;
+ #endif
+ 
++} // namespace gadget
++
+ #endif /* of FOF */
+diff --git a/src/ngenic/ngenic.cc b/src/ngenic/ngenic.cc
+index 591e127..07d461f 100644
+--- a/src/ngenic/ngenic.cc
++++ b/src/ngenic/ngenic.cc
+@@ -655,7 +655,7 @@ void ngenic::ngenic_get_derivate_from_fourier_field(int axes1, int axes2, fft_co
+   fft_real *workspace = (fft_real *)Mem.mymalloc("workspace", maxfftsize * sizeof(fft_real));
+ 
+ #ifndef FFT_COLUMN_BASED
+-  fft(&fft_of_grid[0], &workspace[0], -1);
++  fft((fft_real *)fft_of_grid, workspace, -1);
+ #else
+   fft((fft_real *)fft_of_grid, workspace, -1);  // result is in workspace
+   memcpy(fft_of_grid, workspace, maxfftsize * sizeof(fft_real));

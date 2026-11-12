@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "literature-digest": {
+      "command": "python3",
+      "args": [
+        "-m",
+        "literature_digest_agent.mcp_server",
+        "--transport",
+        "stdio"
+      ],
+      "cwd": "/absolute/path/to/literature_digest_agent"
+    }
+  }
+}

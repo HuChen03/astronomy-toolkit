@@ -1,0 +1,38 @@
+% 2LPTIC 最小算例（单机秒级）：64^3 网格、32^3 粒子、50 Mpc/h、Eisenstein&Hu 谱、z=49
+% 格式：关键字 值；28 项全部必填（read_param.c 核实）
+% 来源：改编自官方 run2LPT.tar.gz 的 2lpt_Carmen.param
+
+Nmesh           64          % FFT 网格（>= Nsample）
+Nsample         32          % 每维粒子数（总数 32^3=32768）
+Box             50.0        % Mpc/h
+FileBase        ics         % 输出前缀 -> OutputDir/ics.0, ics.1 ...
+OutputDir       ./output    % 必须已存在
+
+GlassFile       ./glass.dat % 1 粒子网格 glass（make_grid_glass.py 生成）
+GlassTileFac    32          % = Nsample（网格起点）
+
+Omega           0.308
+OmegaLambda     0.692
+OmegaBaryon     0.0482
+OmegaDM_2ndSpecies 0
+HubbleParam     0.678
+Redshift        49
+Sigma8          0.815
+
+SphereMode      0           % 0=立方体模；1=球
+WhichSpectrum   1           % 1=Eisenstein&Hu；2=读表；其他=Efstathiou
+FileWithInputSpectrum  ./dummy_spectrum.dat  % 仅 WhichSpectrum=2 读取
+InputSpectrum_UnitLength_in_cm  3.085678e24
+ShapeGamma      0.21        % 仅 Efstathiou 谱用
+PrimordialIndex 1.0
+Seed            42
+
+NumFilesWrittenInParallel 2  % mpirun 的 N 必须 >= 且整除它
+
+UnitLength_in_cm          3.085678e24   % Mpc/h
+UnitMass_in_g             1.989e43      % 1e10 Msun/h
+UnitVelocity_in_cm_per_s  1e5           % km/s
+
+WDM_On               0
+WDM_Vtherm_On        0
+WDM_PartMass_in_kev  10.0

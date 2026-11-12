@@ -1,0 +1,24 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+logs/*.log
+run/*.pid
+data/daily_digest_cache/
+data/indexes/versions/
+
+# Generated model/index artifacts can be rebuilt.
+*.npy
+*.faiss
+faiss.index
+
+# Local pipeline scratch data.
+data/knowledge_acquisition/**/tmp/
+data/knowledge_acquisition/**/*failures.json

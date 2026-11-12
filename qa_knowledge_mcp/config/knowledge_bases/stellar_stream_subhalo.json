@@ -1,0 +1,8 @@
+{
+  "id": "stellar_stream_subhalo",
+  "name": "星流与子暗物质晕相互作用",
+  "description": "星流（stellar stream）与子暗物质晕（subhalo）相互作用方向的小型知识库：覆盖子晕相遇动力学、gap 形成与增长、密度与运动学扰动特征、扰动体质量推断、CDM/WDM/SIDM 区分、星流建模方法（微扰论、particle-spray、可微分模拟）以及 Gaia/DESI 观测证据。含 Sanders/Bovy/Erkal 2016、StreamSculptor（Nibauer 2025）、GD-1 运动学子结构测量（2025）等种子论文及其经典与近年相关文献。",
+  "source": "data/knowledge_bases/stellar_stream_subhalo/source.jsonl",
+  "index": "data/knowledge_bases/stellar_stream_subhalo/index",
+  "enabled": true
+}

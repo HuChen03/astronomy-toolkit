@@ -1,0 +1,50 @@
+{
+  "categories": [
+    {
+      "id": "aqueous_zinc_battery",
+      "name": "水系锌离子电池",
+      "definition": "水系锌离子电池、锌负极、枝晶抑制、电解液和界面调控相关论文。",
+      "terms": [
+        "aqueous zinc ion battery",
+        "zinc-ion battery",
+        "zinc anode",
+        "zinc dendrite",
+        "锌离子电池",
+        "锌负极",
+        "枝晶"
+      ],
+      "weight": 8,
+      "match_mode": "any",
+      "enabled": true
+    },
+    {
+      "id": "kagome_superconductor",
+      "name": "Kagome 超导",
+      "definition": "Kagome 材料、非常规超导、电荷密度波和关联电子态相关论文。",
+      "terms": [
+        "kagome",
+        "superconductor",
+        "charge density wave",
+        "unconventional superconductivity"
+      ],
+      "weight": 5,
+      "match_mode": "any",
+      "enabled": true
+    },
+    {
+      "id": "vision_language_robot",
+      "name": "视觉语言机器人",
+      "definition": "视觉语言模型、机器人操作、具身智能和 VLA 相关论文。",
+      "terms": [
+        "vision language action",
+        "vision-language",
+        "robot manipulation",
+        "embodied ai",
+        "具身智能"
+      ],
+      "weight": 5,
+      "match_mode": "any",
+      "enabled": true
+    }
+  ]
+}

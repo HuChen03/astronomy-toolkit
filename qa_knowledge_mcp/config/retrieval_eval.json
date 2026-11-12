@@ -1,0 +1,42 @@
+[
+  {
+    "query": "论文采用的默认宇宙学和原初气体参数",
+    "paper_keys": ["10.1007_s41115-022-00015-5"]
+  },
+  {
+    "query": "双质量粒子检验宇宙学模拟中的两体弛豫",
+    "paper_keys": ["10.1046_j.1365-8711.2002.05400.x"]
+  },
+  {
+    "query": "ABACUSSUMMIT模拟套件的科研定位和主要目标",
+    "paper_keys": ["10.1093_mnras_stab2484"]
+  },
+  {
+    "query": "Illustris Project 星系形成模拟的定位和核心科学目标",
+    "paper_keys": ["10.1093_mnras_stu1536"]
+  },
+  {
+    "query": "21cmFAST 快速再电离模拟器的主要用途",
+    "paper_keys": ["10.1111_j.1365-2966.2010.17731.x"]
+  },
+  {
+    "query": "AREPO 星系形成模型中的恒星反馈和 AGN 反馈",
+    "paper_keys": ["10.1093_mnras_stt1789"]
+  },
+  {
+    "query": "SIMBA 模拟中的黑洞增长与反馈模型",
+    "paper_keys": ["10.1093_mnras_stz937"]
+  },
+  {
+    "query": "FLAMINGO 如何使用机器学习校准大型流体模拟",
+    "paper_keys": ["10.1093_mnras_stad2540"]
+  },
+  {
+    "query": "MultiDark Database 提供哪些 Bolshoi 和 MultiDark 模拟数据",
+    "paper_keys": ["10.1002_asna.201211900"]
+  },
+  {
+    "query": "Millennium-II 如何提升小尺度结构形成的分辨率",
+    "paper_keys": ["10.1111_j.1365-2966.2009.15191.x"]
+  }
+]

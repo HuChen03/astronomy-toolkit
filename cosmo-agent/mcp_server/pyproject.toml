@@ -1,0 +1,22 @@
+[project]
+name = "cosmo-exec-mcp"
+version = "0.1.0"
+description = "Generic MCP execution layer for scientific CLI software (files, processes, Slurm)"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.27,<2",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+simulation = ["h5py", "numpy"]
+
+[project.scripts]
+cosmo-exec-mcp = "cosmo_exec.server:main"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

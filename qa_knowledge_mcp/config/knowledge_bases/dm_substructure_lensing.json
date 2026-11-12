@@ -1,0 +1,8 @@
+{
+  "id": "dm_substructure_lensing",
+  "name": "暗物质子结构与强引力透镜",
+  "description": "覆盖暗物质子结构（subhalo）与强引力透镜方向的 QA 知识：flux ratio 异常的成因与统计、引力成像探测子结构、子晕质量函数测量、视线结构与重子系统误差、CDM/WDM/FDM 等暗物质模型限制，以及 JWST 透镜类星体巡天最新进展。代表论文包括 Mao & Schneider 1998、Dalal & Kochanek 2002、Xu et al. 2015（射电流量比异常）、Vegetti et al. 2012/2014（引力成像探测）、Hsueh et al. 2020（SHARP VII）、Gilman et al. 2019/2024/2025（WDM 限制与 JWST lensed quasar dark matter survey II-IV）等 25 篇经典与近两年文献。",
+  "source": "data/knowledge_bases/dm_substructure_lensing/source.jsonl",
+  "index": "data/knowledge_bases/dm_substructure_lensing/index",
+  "enabled": true
+}

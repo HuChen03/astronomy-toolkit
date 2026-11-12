@@ -1,0 +1,8 @@
+{
+  "id": "multitarget_fiber_spectroscopy",
+  "name": "多目标光纤光谱数据处理",
+  "description": "面向SDSS、DESI、PFS、LAMOST及相关巡天的多目标光纤光谱仪器、数据处理管线、质量控制、数据模型和公开数据产品知识库；同时纳入DESI官方数据发布文档、数据模型文档和代码仓库资料。",
+  "source": "data/knowledge_bases/multitarget_fiber_spectroscopy/source.jsonl",
+  "index": "data/knowledge_bases/multitarget_fiber_spectroscopy/index",
+  "enabled": true
+}

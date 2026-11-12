@@ -1,0 +1,8 @@
+{
+  "id": "halo_boundary",
+  "name": "暗物质晕边界",
+  "description": "暗物质晕边界（halo boundary）方向的小型知识库：覆盖 splashback 半径的物理起源与测量（More/Diemer/Kravtsov 2015 种子论文）、depletion radius 的提出与演化（Fong & Han 2021、Gao et al. 2023、Zhou & Han 2026 种子论文）、SPARTA 系列粒子动力学算法、边界对吸积率/红移/宇宙学的依赖、SDSS/DES/KiDS/eROSITA/LoCuSS 等巡天的观测测量，以及边界在宇宙学参数约束和团簇质量估计中的应用。共 24 篇：经典奠基、边界定义与算法、边界物理与演化、观测测量、应用与宇宙学五个类别。",
+  "source": "data/knowledge_bases/halo_boundary/source.jsonl",
+  "index": "data/knowledge_bases/halo_boundary/index",
+  "enabled": true
+}

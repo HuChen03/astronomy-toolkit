@@ -1,0 +1,55 @@
+[project]
+name = "lab-knowledge-platform"
+version = "0.2.0"
+description = "Astronomy knowledge-base search and independent daily literature MCP services."
+requires-python = ">=3.10"
+dependencies = [
+  "mcp>=1.27,<2",
+  "numpy>=1.24",
+  "scikit-learn>=1.3",
+  "rank-bm25>=0.2",
+  "requests>=2.31",
+]
+
+[project.optional-dependencies]
+vector = [
+  "sentence-transformers>=5.0",
+  "faiss-cpu>=1.8",
+]
+dev = [
+  "pytest>=8",
+]
+
+[project.scripts]
+astronomy-knowledge-mcp = "qa_knowledge_mcp.mcp_server:main"
+qa-knowledge-build = "qa_knowledge_mcp.build_kb:main"
+qa-knowledge-query = "qa_knowledge_mcp.query:main"
+literature-digest-agent = "literature_digest_agent.cli:main"
+literature-digest-refresh = "literature_digest_agent.daily_job:main"
+literature-digest-mcp = "literature_digest_agent.mcp_server:main"
+qa-knowledge-versioned-build = "qa_knowledge_mcp.versioned_index:main"
+qa-knowledge-evaluate = "qa_knowledge_mcp.evaluate:main"
+qa-knowledge-import-documents = "pipelines.knowledge_acquisition.import_knowledge_documents:main"
+qa-knowledge-worker = "pipelines.knowledge_acquisition.task_worker:main"
+qa-knowledge-backfill-markdown = "pipelines.knowledge_acquisition.backfill_markdown:main"
+qa-knowledge-sync-relations = "pipelines.knowledge_acquisition.sync_paper_relations:main"
+qa-knowledge-import-structured = "pipelines.knowledge_acquisition.import_structured_knowledge:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+addopts = ["--import-mode=importlib"]
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src", "pipelines" = "pipelines"}
+packages = [
+  "lab_knowledge_platform",
+  "literature_digest_agent",
+  "qa_knowledge_mcp",
+  "pipelines",
+  "pipelines.knowledge_acquisition",
+]

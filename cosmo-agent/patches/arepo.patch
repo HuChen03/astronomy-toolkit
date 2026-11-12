@@ -1,0 +1,43 @@
+diff --git a/Makefile b/Makefile
+index 994b2e1..d0f9b85 100755
+--- a/Makefile
++++ b/Makefile
+@@ -45,6 +45,21 @@ HWLOC_LIB = -lhwloc
+ 
+ 
+ # e.g. Mac OS using MacPorts modules for openmpi, fftw, gsl, hdf5 and hwloc
++ifeq ($(SYSTYPE),"CosmoLinux")
++# Ubuntu 22.04 + OpenMPI + 系统包（cosmo-agent 项目添加）
++CC        =  mpicc
++OPTIMIZE  =  -std=c11 -O3 -Wall -Wno-format-security -Wno-unknown-pragmas -Wno-unused-function
++MPICH_LIB =
++GSL_INCL  = -I/usr/include
++GSL_LIB   = -L/usr/lib/x86_64-linux-gnu -lgsl -lgslcblas
++HWLOC_INCL= -I/usr/include
++HWLOC_LIB = -L/usr/lib/x86_64-linux-gnu -lhwloc
++FFTW_INCL = -I/usr/include
++FFTW_LIBS = -L/usr/lib/x86_64-linux-gnu
++HDF5_INCL = -I/usr/include/hdf5/openmpi -DH5_USE_16_API
++HDF5_LIB  = -L/usr/lib/x86_64-linux-gnu/hdf5/openmpi -lhdf5 -lz
++endif
++
+ ifeq ($(SYSTYPE),"Darwin")
+ # compiler and its optimization options
+ CC        =  mpicc   # sets the C-compiler
+@@ -66,7 +81,7 @@ endif
+ 
+ # insert the library paths for your system here, similar to SYSTYPE "Darwin" above
+ 
+-# AREPOVTK
++ifeq ($(SYSTYPE),"AREPOVTK")
+ CC        = mpicc
+ OPTIMIZE  = -std=c11 -g -O3
+ MPICH_LIB = -lmpi
+@@ -78,6 +93,7 @@ FFTW_LIBS = -L${FFTW_HOME}/lib
+ HDF5_INCL = -I${HDF5_HOME}/include -DH5_USE_16_API
+ HDF5_LIB  = -L${HDF5_HOME}/lib -lhdf5
+ 
++endif
+ # END AREPOVTK
+ 
+ ifndef LINKER

@@ -1,0 +1,8 @@
+{
+  "id": "main",
+  "name": "主知识库",
+  "description": "天文学与宇宙学文献主 QA 知识库，使用 question/answer 及其对应原文段落进行检索。",
+  "source": "data/cosmological_simulation/generate_paper.jsonl",
+  "index": "data/indexes/versions/20260811T091518Z-f12c2aae0506",
+  "enabled": true
+}
